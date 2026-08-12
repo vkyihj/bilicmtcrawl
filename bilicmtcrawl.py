@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     B站视频评论爬取 · 交互式整合脚本 v3.3.4              ║
+║     B站视频评论爬取 · 交互式整合脚本 v3.3.5              ║
 ║     （Bili Comment Crawler）                              ║
 ║                                                            ║
 ║  模式1 - 全量爬取（一级评论 + 所有楼中楼）                  ║
@@ -10,21 +10,17 @@
 ║                                                            ║
 ║  支持：时间排序 / 热度排序 / 回复数排序                     ║
 ║  特性：断点续传 · Wbi签名 · 反风控 · 回复树构建             ║
+║        Cookie自动读取bilicookie.txt · 输出按视频标题归档    ║
 ╚══════════════════════════════════════════════════════════════╝
 
-v3.3.4 变更记录：
-  - 新增按视频标题命名的输出文件夹（自动清洗非法字符，标题为空回退 BV号_视频）
-  - view 接口返回的完整视频信息保存为 <视频文件夹>/信息.md（概览表格+完整JSON，不丢字段）
-  - 评论输出文件（JSON/TXT）与检查点文件全部移入该文件夹，文件夹自动创建、不覆盖旧文件
-  - 其余爬取/断点/Wbi/交互逻辑与 v3.3.3 完全一致
+v3.3.5 变更记录：
+  - 新增自动读取 Cookie：运行前将 Cookie 粘贴到本目录 bilicookie.txt
+    （仅一行裸Cookie，无任何标识），脚本自动读取，无需每次手动输入
+  - bilicookie.txt 不存在或为空时，自动回退为原交互式粘贴输入
+  - 兼容处理：自动剥离文件内容中的 "Cookie:" 前缀、首尾引号与 BOM
 
-v3.3.3 变更记录：
-  - 模式3支持直接粘贴 B站评论区复制的评论链接，自动识别BV号与楼主id
-    （新增 extract_root_rpid，支持 comment_root_id 参数 / #reply 锚点 / 纯数字）
-  - input_bvid_interactive 返回 (bvid, link_rpid)，步骤4可回车直接用链接中的楼主id
-  - print_banner 改为变量写法，消除多括号转录风险
 
-用法：python dlbilicmt.py
+用法：python bilicmtcrawl.py
       然后按终端提示依次选择/输入即可，无需修改任何代码
 """
 
@@ -165,6 +161,32 @@ def parse_cookie(cookie_str: str) -> dict:
             key, value = item.split('=', 1)
             cookies[key] = value
     return cookies
+
+
+def load_cookie_from_file(filename: str = 'bilicookie.txt') -> str | None:
+    """
+    从当前目录读取 Cookie 文件（v3.3.5 新增）。
+    文件仅包含一行裸 Cookie，无任何标识；自动兼容处理：
+      - 以 UTF-8 读取（容忍 BOM）
+      - 剥离可选的 "Cookie:" 前缀
+      - 剥离首尾引号
+    文件不存在、内容为空或读取失败时返回 None。
+    """
+    if not os.path.exists(filename):
+        return None
+    try:
+        with open(filename, 'r', encoding='utf-8-sig') as f:
+            content = f.read().strip()
+        if not content:
+            return None
+        if content.lower().startswith('cookie:'):
+            content = content[len('cookie:'):].strip()
+        if len(content) >= 2 and content[0] == '"' and content[-1] == '"':
+            content = content[1:-1].strip()
+        return content if content else None
+    except Exception as e:
+        cprint(Ansi.yellow, f"  ⚠ 读取 {filename} 失败: {e}")
+        return None
 
 
 def get_mixin_key(orig: str) -> str:
@@ -397,7 +419,7 @@ def _truncate_grapheme(text: str, max_len: int) -> str:
     按“字素簇”（grapheme cluster）安全截断文本（不附加省略号），
     避免从字符中间截断：
       - 组合字符（如 é = e + U+0301）
-      - ZWJ/ZWNJ 连接的表情序列（如 👨👩👧👦）
+      - ZWJ/ZWNJ 连接的表情序列（如 👨‍👩‍👧‍👦）
       - 变体选择符（如 ❤️ = ❤ + U+FE0F）
       - 代理对（Python3 正常 str 不会出现，保留防御性处理）
     文本不超长时原样返回。
@@ -1124,7 +1146,7 @@ def print_banner():
     banner = """
 ╔══════════════════════════════════════════════════╗
 ║     🎯  评论爬取                                ║
-║     B站视频评论爬虫 · 交互式脚本 v3.3.4        ║
+║     B站视频评论爬虫 · 交互式脚本 v3.3.5        ║
 ║                                                  ║
 ║  模式1 · 全量爬取（一级评论 + 全部楼中楼）      ║
 ║  模式2 · 仅一级评论                             ║
@@ -1133,6 +1155,7 @@ def print_banner():
 ║  支持时间/热度/回复数排序 · 断点续传 · 树形展示 ║
 ║  支持粘贴评论链接自动识别BV号与楼主id            ║
 ║  输出按视频标题自动归入独立文件夹                ║
+║  Cookie自动读取bilicookie.txt（可免手动输入）   ║
 ╚══════════════════════════════════════════════════╝
 """
     print(Ansi.bold(Ansi.cyan(banner)))
@@ -1171,9 +1194,23 @@ def select_mode() -> int:
 
 
 def input_cookie_interactive() -> str:
-    """交互输入Cookie（支持多行粘贴，空行结束），返回拼接后的Cookie字符串。"""
-    print(Ansi.bold("\n📌 步骤2：输入Cookie"))
+    """
+    获取 Cookie：
+      1. 优先自动读取当前目录 bilicookie.txt（仅一行裸Cookie，无标识，v3.3.5）
+      2. 文件不存在/为空时，回退为交互式粘贴输入（支持多行，空行结束）
+    返回 Cookie 字符串。
+    """
+    print(Ansi.bold("\n📌 步骤2：Cookie"))
     print("─" * 45)
+
+    auto_cookie = load_cookie_from_file('bilicookie.txt')
+    if auto_cookie:
+        cprint(Ansi.green, "  ✅ 已自动读取本目录 bilicookie.txt")
+        cprint(Ansi.dim, "  💡 如需改用手动输入，删除或改名该文件后重跑即可")
+        if 'SESSDATA' not in auto_cookie:
+            cprint(Ansi.yellow, "  ⚠ Cookie中未检测到SESSDATA，可能无法正常工作")
+        return auto_cookie
+
     print(f"""
   {Ansi.dim('Cookie 获取方法：')}
     1. 浏览器打开 bilibili.com 并登录
@@ -1182,6 +1219,7 @@ def input_cookie_interactive() -> str:
     4. 右键 → 复制值(Copy value)
 
   {Ansi.yellow('⚠ Cookie 需含 SESSDATA 字段（有效期约30天）')}
+  {Ansi.dim('💡 可提前粘贴到本目录 bilicookie.txt（仅一行裸Cookie），下次自动读取免输入')}
   {Ansi.dim('直接粘贴后按回车，如有换行继续粘贴，输完按两次回车')}
     """)
     print("  " + "─" * 40)

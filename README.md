@@ -1,6 +1,6 @@
 # Bili Comment Crawler
 
-交互式 B 站视频评论爬取脚本（当前版本 v3.3.4）。按终端提示依次选择模式、输入参数即可，无需修改代码。
+交互式 B 站视频评论爬取脚本（当前版本 v3.3.5）。按终端提示依次选择模式、输入参数即可，无需修改代码。
 
 ## 功能特性
 
@@ -13,6 +13,7 @@
 - 支持纯 BV 号、完整链接、b23.tv 短链接（自动解析）输入
 - 模式 3 支持直接粘贴评论区评论链接，自动识别 BV 号与楼主 id（root_rpid）
 - 输出按视频标题自动归档到独立文件夹；view 接口完整信息存为 `信息.md`
+- **自动读取本目录 `bilicookie.txt`（单行裸 Cookie），免手动输入；文件缺失时回退手动粘贴**
 - 每次输出 JSON + TXT；三种速度预设；Cookie 自动检测；可选 tqdm 进度条
 
 ## 安装
@@ -27,7 +28,7 @@
 python bilicmtcrawl.py
 ```
 
-按提示依次：选择模式 → 粘贴 Cookie → 输入 BVID → 选择排序 → 选择速度 → 确认摘要 → 等待完成。结果保存在脚本同目录下、按视频标题命名的文件夹中。
+按提示依次：选择模式 → 输入 Cookie（或已配置 bilicookie.txt 则自动读取）→ 输入 BVID → 选择排序 → 选择速度 → 确认摘要 → 等待完成。结果保存在脚本同目录下、按视频标题命名的文件夹中。
 
 ## 爬取模式
 
@@ -63,7 +64,14 @@ python bilicmtcrawl.py
 
 ## Cookie
 
-需 B 站登录后的 Cookie，`SESSDATA` 必需（约 30 天有效）。F12 → 网络 → 任意请求 → 复制 Request Headers 的 Cookie 值；多行粘贴时连按两次回车结束。过期后 API 返回 `code=-101`，脚本提示退出。
+两种方式任选：
+
+1. **推荐**：将 Cookie 粘贴到脚本同目录的 `bilicookie.txt`（仅一行裸 Cookie，无任何标识），每次运行自动读取，免手动输入
+2. 直接运行脚本，在步骤 2 手动粘贴（多行粘贴时连按两次回车结束）
+
+需 B 站登录后的 Cookie，`SESSDATA` 必需（约 30 天有效）。过期后 API 返回 `code=-101`，脚本提示退出。
+
+> 注意：`bilicookie.txt` 含登录凭证，请勿提交到公开仓库（建议加入 `.gitignore`）。
 
 ## 输出
 
@@ -121,17 +129,21 @@ JSON 结构（模式 1/2）：
 ## FAQ
 
 - **报错 `No module named 'requests'`**：`pip install requests`
-- **Cookie 无效或过期**：重新登录复制，确认包含 `SESSDATA`
+- **Cookie 无效或过期**：重新登录复制，确认包含 `SESSDATA`；或更新 `bilicookie.txt`
 - **全量爬取选什么排序**：时间排序，翻页上限最高
 - **怎么找 root_rpid**：粘贴评论链接自动识别 / 模式 2 搜 JSON / 手动输入数字
 - **中断了怎么办**：直接重跑，自动从检查点恢复
 - **评论内容被截断？**：终端与 TXT 按“字素簇”安全截断（避免劈开 emoji），JSON 的 `message` 始终完整
 - **Windows 颜色异常**：使用 PowerShell / Windows Terminal / VS Code 终端
 - **模式 3 粘贴链接后还要输数字吗**：链接含 `comment_root_id=` 或 `#reply` 时直接回车即可
+- **不想每次手动输入 Cookie？**：把 Cookie 存到同目录 `bilicookie.txt`（一行裸 Cookie），自动读取；删除或改名该文件即恢复手动输入
 
 ## 交互示例（节选）
 
 ```
+步骤2：Cookie
+  ✅ 已自动读取本目录 bilicookie.txt
+
 步骤3：输入视频BVID
   BVID: https://www.bilibili.com/video/BV1kxuw6iEb2?comment_on=1&comment_root_id=309041328033
   ✅ 识别到: BV1kxuw6iEb2，楼主id: 309041328033
@@ -154,7 +166,7 @@ JSON 结构（模式 1/2）：
 | 项目 | 说明 |
 |---|---|
 | API 端点 | `/x/v2/reply`、`/x/v2/reply/reply`、`/x/v2/reply/detail`、`/x/web-interface/nav`、`/x/web-interface/view` |
-| 认证方式 | Wbi 签名（w_rid + wts）+ Cookie（SESSDATA） |
+| 认证方式 | Wbi 签名（w_rid + wts）+ Cookie（SESSDATA，可经 bilicookie.txt 自动读取） |
 | 一级评论上限 | 500 页 × 20 条 = 10000 条 |
 | 楼中楼上限 | 100 页 × 20 条 = 2000 条/楼层 |
 | 评论链接解析 | `comment_root_id=` → `#reply` → 纯数字 |
