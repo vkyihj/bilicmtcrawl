@@ -52,7 +52,7 @@ except ImportError:
                 yield item
         def update(self, n=1): pass
         def set_description(self, desc): pass
-        def set_postfix(self, **kwargs): pass
+        def set_postfix(self, *args, **kwargs): pass
         def close(self): pass
         def __enter__(self): return self
         def __exit__(self, *args): pass
