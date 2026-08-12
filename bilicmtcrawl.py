@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     B站视频评论爬取 · 交互式整合脚本 v3.3.3              ║
+║     B站视频评论爬取 · 交互式整合脚本 v3.3.4              ║
 ║     （Bili Comment Crawler）                              ║
 ║                                                            ║
 ║  模式1 - 全量爬取（一级评论 + 所有楼中楼）                  ║
@@ -11,6 +11,12 @@
 ║  支持：时间排序 / 热度排序 / 回复数排序                     ║
 ║  特性：断点续传 · Wbi签名 · 反风控 · 回复树构建             ║
 ╚══════════════════════════════════════════════════════════════╝
+
+v3.3.4 变更记录：
+  - 新增按视频标题命名的输出文件夹（自动清洗非法字符，标题为空回退 BV号_视频）
+  - view 接口返回的完整视频信息保存为 <视频文件夹>/信息.md（概览表格+完整JSON，不丢字段）
+  - 评论输出文件（JSON/TXT）与检查点文件全部移入该文件夹，文件夹自动创建、不覆盖旧文件
+  - 其余爬取/断点/Wbi/交互逻辑与 v3.3.3 完全一致
 
 v3.3.3 变更记录：
   - 模式3支持直接粘贴 B站评论区复制的评论链接，自动识别BV号与楼主id
@@ -386,14 +392,15 @@ def _is_variation_selector(cp: int) -> bool:
     return 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF
 
 
-def safe_truncate(text: str, max_len: int) -> str:
+def _truncate_grapheme(text: str, max_len: int) -> str:
     """
-    按“字素簇”（grapheme cluster）安全截断文本，避免从字符中间截断：
+    按“字素簇”（grapheme cluster）安全截断文本（不附加省略号），
+    避免从字符中间截断：
       - 组合字符（如 é = e + U+0301）
       - ZWJ/ZWNJ 连接的表情序列（如 👨👩👧👦）
       - 变体选择符（如 ❤️ = ❤ + U+FE0F）
       - 代理对（Python3 正常 str 不会出现，保留防御性处理）
-    截断处附加省略号“...”。
+    文本不超长时原样返回。
     """
     if len(text) <= max_len:
         return text
@@ -418,7 +425,17 @@ def safe_truncate(text: str, max_len: int) -> str:
             continue
         break
 
-    return ''.join(chars[:cut]) + '...'
+    return ''.join(chars[:cut])
+
+
+def safe_truncate(text: str, max_len: int) -> str:
+    """
+    按“字素簇”（grapheme cluster）安全截断文本，避免从字符中间截断，
+    截断处附加省略号“...”。截断边界判断逻辑见 _truncate_grapheme。
+    """
+    if len(text) <= max_len:
+        return text
+    return _truncate_grapheme(text, max_len) + '...'
 
 
 def _resolve_short_link(url: str) -> str | None:
@@ -507,6 +524,118 @@ def extract_root_rpid(raw: str) -> int | None:
         return int(raw)
 
     return None
+
+
+# ============================================================
+# 输出目录 & 视频信息保存（v3.3.4 新增）
+# ============================================================
+
+def sanitize_dirname(title: str, max_len: int = 60) -> str:
+    """
+    将视频标题清洗为安全的文件夹名：
+      - Windows 非法字符 \\ / : * ? " < > | 替换为下划线 _
+      - 移除控制字符（\x00-\x1f、\x7f）
+      - 去除首尾空白
+      - 按字素簇安全截断到 max_len（默认60字符，不会从emoji/组合字符中间切断）
+    清洗后为空字符串时返回 ''（由调用方回退）。
+    """
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', '_', title)
+    name = name.strip()
+    if not name:
+        return ''
+    return _truncate_grapheme(name, max_len)
+
+
+def ensure_output_dir(title: str, bvid: str) -> str:
+    """
+    在当前目录下创建并返回按视频标题命名的输出文件夹（绝对路径）。
+    标题为空或清洗后为空时，回退为「BV号_视频」。
+    文件夹已存在时直接复用（不删除旧文件，新文件追加其中）。
+    """
+    dirname = sanitize_dirname(title)
+    if not dirname:
+        dirname = f'{bvid}_视频'
+    output_dir = os.path.join(os.getcwd(), dirname)
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
+def _md_escape_cell(v) -> str:
+    """Markdown 表格单元格转义：| → \\|，换行 → <br>"""
+    s = str(v)
+    return s.replace('|', '\\|').replace('\r', '').replace('\n', '<br>')
+
+
+def save_view_info_md(output_dir: str, view: dict, video_info: dict):
+    """
+    将 view 接口返回的完整信息写入 <输出文件夹>/信息.md。
+    内容包含：
+      1. Markdown 可读概览表格（标题/UP主/分区/播放量/点赞等常用字段）
+      2. view 接口的完整原始 JSON（code、message、data 全部字段，一条不丢）
+    多次运行时该文件会被覆盖为最新快照（同一视频的当前信息）。
+    """
+    data = view.get('data', {}) if isinstance(view, dict) else {}
+    owner = data.get('owner', {}) or {}
+    stat = data.get('stat', {}) or {}
+    ts_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    duration = data.get('duration', 0)
+    if duration:
+        dur_str = f"{duration // 60}分{duration % 60}秒"
+    else:
+        dur_str = '未知'
+
+    lines = []
+    lines.append(f"# 视频信息：{video_info.get('title', '?')}")
+    lines.append('')
+    lines.append(f"- **BVID**: `{video_info.get('bvid', '')}`")
+    lines.append(f"- **AID**: `{video_info.get('aid', '')}`")
+    lines.append(f"- **抓取时间**: {ts_now}")
+    lines.append('')
+    lines.append('## 概览')
+    lines.append('')
+    lines.append('| 字段 | 值 |')
+    lines.append('| --- | --- |')
+    rows = [
+        ('标题', data.get('title', '')),
+        ('简介', data.get('desc', '')),
+        ('BVID', data.get('bvid', '')),
+        ('AID', data.get('aid', '')),
+        ('分区', f"{data.get('tname', '')} (tid={data.get('tid', '')})"),
+        ('UP主', f"{owner.get('name', '')} (mid={owner.get('mid', '')})"),
+        ('UP主头像', owner.get('face', '')),
+        ('发布时间', ts_to_str(data.get('pubdate', 0))),
+        ('审核时间', ts_to_str(data.get('ctime', 0))),
+        ('时长', dur_str),
+        ('分P数', data.get('videos', '')),
+        ('封面', data.get('pic', '')),
+        ('版权类型', data.get('copyright', '')),
+        ('状态 state', data.get('state', '')),
+        ('动态 dynamic', data.get('dynamic', '')),
+        ('播放量', stat.get('view', '')),
+        ('点赞数', stat.get('like', '')),
+        ('投币数', stat.get('coin', '')),
+        ('收藏数', stat.get('favorite', '')),
+        ('分享数', stat.get('share', '')),
+        ('弹幕数', stat.get('danmaku', '')),
+        ('评论数', stat.get('reply', '')),
+        ('当前排名', stat.get('now_rank', '')),
+        ('历史最高排名', stat.get('his_rank', '')),
+    ]
+    for k, v in rows:
+        lines.append(f"| {k} | {_md_escape_cell(v)} |")
+    lines.append('')
+    lines.append('## 完整原始数据（view 接口返回，未舍弃任何字段）')
+    lines.append('')
+    lines.append('```json')
+    lines.append(json.dumps(view, ensure_ascii=False, indent=2))
+    lines.append('```')
+    lines.append('')
+
+    md_path = os.path.join(output_dir, '信息.md')
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+    cprint(Ansi.green, f"  📄 视频信息已保存: {md_path}")
 
 
 # ============================================================
@@ -882,10 +1011,11 @@ def get_root_comment_info(session: requests.Session, aid: int,
 # ============================================================
 
 def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
-                       sort_label: str):
+                       sort_label: str, output_dir: str):
     """
     输出模式1/模式2的爬取结果：按时间倒序排序后写入 JSON 与 TXT 文件，并打印汇总。
     JSON 含视频信息、统计（总数/一级/楼中楼/去重用户数）与全部评论。
+    文件写入 output_dir（按视频标题命名的文件夹）。
     """
     all_comments.sort(key=lambda x: x['ctime'], reverse=True)
     root_count = sum(1 for c in all_comments if c['root'] == 0)
@@ -896,8 +1026,8 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
     tag = sort_label.replace(' ', '_').replace('🕐', '').replace('🔥', '').replace('💬', '')
     tag = tag.strip('_') or 'time'
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    json_path = f'comments_{bvid}_{tag}_{ts}.json'
-    txt_path = f'comments_{bvid}_{tag}_{ts}.txt'
+    json_path = os.path.join(output_dir, f'comments_{bvid}_{tag}_{ts}.json')
+    txt_path = os.path.join(output_dir, f'comments_{bvid}_{tag}_{ts}.txt')
 
     result = {
         'video': video_info,
@@ -934,10 +1064,10 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
 
 def output_mode3(root_comment: dict, replies: list, tree_root: dict,
                  video_info: dict, bvid: str, root_rpid: int,
-                 display_mode: str):
+                 display_mode: str, output_dir: str):
     """
     输出模式3结果：按 display_mode（tree/flat）在终端展示，并写入 JSON 与 TXT 文件。
-    文件包含根评论、楼中楼扁平列表与回复树结构。
+    文件包含根评论、楼中楼扁平列表与回复树结构。文件写入 output_dir。
     """
     print(f"\n{'='*55}")
     print(f"  📺 {video_info.get('title', '?')}")
@@ -954,8 +1084,8 @@ def output_mode3(root_comment: dict, replies: list, tree_root: dict,
         tag = 'flat'
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    json_path = f'replies_{bvid}_root{root_rpid}_{tag}_{ts}.json'
-    txt_path = f'replies_{bvid}_root{root_rpid}_{tag}_{ts}.txt'
+    json_path = os.path.join(output_dir, f'replies_{bvid}_root{root_rpid}_{tag}_{ts}.json')
+    txt_path = os.path.join(output_dir, f'replies_{bvid}_root{root_rpid}_{tag}_{ts}.txt')
 
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump({
@@ -994,7 +1124,7 @@ def print_banner():
     banner = """
 ╔══════════════════════════════════════════════════╗
 ║     🎯  评论爬取                                ║
-║     B站视频评论爬虫 · 交互式脚本 v3.3.3        ║
+║     B站视频评论爬虫 · 交互式脚本 v3.3.4        ║
 ║                                                  ║
 ║  模式1 · 全量爬取（一级评论 + 全部楼中楼）      ║
 ║  模式2 · 仅一级评论                             ║
@@ -1002,6 +1132,7 @@ def print_banner():
 ║                                                  ║
 ║  支持时间/热度/回复数排序 · 断点续传 · 树形展示 ║
 ║  支持粘贴评论链接自动识别BV号与楼主id            ║
+║  输出按视频标题自动归入独立文件夹                ║
 ╚══════════════════════════════════════════════════╝
 """
     print(Ansi.bold(Ansi.cyan(banner)))
@@ -1317,6 +1448,11 @@ def main():
     print(f"  🆔 AID: {aid}")
     video_info = {'aid': aid, 'bvid': bvid, 'title': title}
 
+    # ── v3.3.4：创建按视频标题命名的输出文件夹，并保存完整view信息 ──
+    output_dir = ensure_output_dir(title, bvid)
+    save_view_info_md(output_dir, view, video_info)
+    cprint(Ansi.cyan, f"  📁 保存目录: {output_dir}")
+
     start_time = time.time()
 
     if mode == 1:
@@ -1325,8 +1461,8 @@ def main():
         print(Ansi.bold("  🚀 模式1：全量爬取"))
         print(f"{'='*45}")
 
-        ckpt_root = f'checkpoint_{bvid}_root_{sort_type}.json'
-        ckpt_reply = f'checkpoint_{bvid}_replies_{sort_type}.json'
+        ckpt_root = os.path.join(output_dir, f'checkpoint_{bvid}_root_{sort_type}.json')
+        ckpt_reply = os.path.join(output_dir, f'checkpoint_{bvid}_replies_{sort_type}.json')
 
         cprint(Ansi.blue, "\n📥 阶段A：拉取一级评论...")
         root_comments, total_count = fetch_root_comments(session, aid, sort_type, nohot, ckpt_root)
@@ -1378,7 +1514,7 @@ def main():
             cprint(Ansi.dim, "\nℹ️  所有一级评论均无楼中楼")
             all_comments = list(root_comments)
 
-        output_mode1_mode2(all_comments, video_info, bvid, sort_label)
+        output_mode1_mode2(all_comments, video_info, bvid, sort_label, output_dir)
 
     elif mode == 2:
         # ═══ 模式2：仅一级评论 ═══
@@ -1386,7 +1522,7 @@ def main():
         print(Ansi.bold("  🚀 模式2：仅一级评论"))
         print(f"{'='*45}")
 
-        ckpt_root = f'checkpoint_{bvid}_rootonly_{sort_type}.json'
+        ckpt_root = os.path.join(output_dir, f'checkpoint_{bvid}_rootonly_{sort_type}.json')
         cprint(Ansi.blue, "\n📥 拉取一级评论...")
         root_comments, total_count = fetch_root_comments(session, aid, sort_type, nohot, ckpt_root)
         if not root_comments:
@@ -1397,7 +1533,7 @@ def main():
             cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条（全站显示约 {total_count} 条）")
         else:
             cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条")
-        output_mode1_mode2(root_comments, video_info, bvid, sort_label)
+        output_mode1_mode2(root_comments, video_info, bvid, sort_label, output_dir)
 
     elif mode == 3:
         # ═══ 模式3：指定楼层 ═══
@@ -1436,7 +1572,7 @@ def main():
         tree_root = build_reply_tree(root_comment, replies)
 
         output_mode3(root_comment, replies, tree_root, video_info, bvid,
-                     root_rpid, display_mode)
+                     root_rpid, display_mode, output_dir)
 
         # 模式3：询问是否继续爬取其他楼层
         print()
@@ -1470,7 +1606,7 @@ def main():
                             print(f"{len(rp)}条 ✅")
 
                     tr = build_reply_tree(rc, rp)
-                    output_mode3(rc, rp, tr, video_info, bvid, new_rpid, new_display)
+                    output_mode3(rc, rp, tr, video_info, bvid, new_rpid, new_display, output_dir)
                 again = input(f"\n  {Ansi.bold('继续爬取其他楼层？[y/n]')}: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             pass
