@@ -970,7 +970,7 @@ def tree_to_text_lines(node: dict, indent: str = '', is_last: bool = True,
     if is_root:
         lines.append(f"⭐ 根评论 [{node['uname']}] (Lv.{node['level']}) "
                      f"{ts_to_str(node['ctime'])}")
-        lines.append(f"「{safe_truncate(node['message'], 100)}」")
+        lines.append(f"「{node['message']}」")
         if node.get('rcount', 0) > 0:
             lines.append(f"💬 {node['rcount']} 条回复")
         if node.get('children'):
@@ -979,7 +979,7 @@ def tree_to_text_lines(node: dict, indent: str = '', is_last: bool = True,
                               i == len(node['children']) - 1, False))
     else:
         prefix = '└── ' if is_last else '├── '
-        lines.append(f"{indent}{prefix}[{node['uname']}] → {safe_truncate(node['message'], 100)} "
+        lines.append(f"{indent}{prefix}[{node['uname']}] → {node['message']} "
                      f"({ts_to_str(node['ctime'])}, 👍{node['like']})")
         if node.get('children'):
             new_indent = indent + ('    ' if is_last else '│   ')
@@ -994,12 +994,12 @@ def flat_to_text_lines(root_comment: dict, replies: list) -> list[str]:
     lines = [
         f"⭐ 根评论 [{root_comment['uname']}] (Lv.{root_comment['level']}) "
         f"{ts_to_str(root_comment['ctime'])}",
-        f"「{safe_truncate(root_comment['message'], 100)}」",
+        f"「{root_comment['message']}」",
         f"{'─'*50}",
     ]
     for r in sorted(replies, key=lambda x: x['ctime']):
         depth = '[二级]' if r['parent'] == root_comment['rpid'] else '[三级+]'
-        lines.append(f"  {depth} [{r['uname']}] → {safe_truncate(r['message'], 100)} "
+        lines.append(f"  {depth} [{r['uname']}] → {r['message']} "
                      f"({ts_to_str(r['ctime'])}, 👍{r['like']})")
     return lines
 
