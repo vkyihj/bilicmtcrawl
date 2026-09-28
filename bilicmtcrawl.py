@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     B站视频评论爬取 · 交互式整合脚本 v3.3.5              ║
+║     B站视频评论爬取 · 交互式整合脚本 v3.3.6              ║
 ║     （Bili Comment Crawler）                              ║
 ║                                                            ║
 ║  模式1 - 全量爬取（一级评论 + 所有楼中楼）                  ║
@@ -12,6 +12,14 @@
 ║  特性：断点续传 · Wbi签名 · 反风控 · 回复树构建             ║
 ║        Cookie自动读取bilicookie.txt · 输出按视频标题归档    ║
 ╚══════════════════════════════════════════════════════════════╝
+
+v3.3.6 变更记录：
+  - 新增评论正文配图（content.pictures）：不再丢弃图片链接
+  - JSON 每条评论新增两个字段：
+      · pictures  —— 原始图片对象列表（img_src/img_width/img_height/img_size）
+      · pic_urls  —— 纯图片链接列表（协议相对地址 // 已补全为 https:）
+  - TXT 每条评论正文后追加图片链接（仅 URL），模式1/2/3 全部生效
+  - JSON stats 与 TXT 头部新增「含图评论数 / 图片总数」统计
 
 v3.3.5 变更记录：
   - 新增自动读取 Cookie：运行前将 Cookie 粘贴到本目录 bilicookie.txt
@@ -374,9 +382,38 @@ def extract_message(item: dict) -> str:
         return content.get('message', '')
     return str(content)
 
+def extract_pictures(item: dict) -> tuple:
+    """
+    兼容提取评论正文配图（content.pictures）。
+    返回 (pictures, pic_urls)：
+      - pictures: 原始图片对象列表（保留 img_src/img_width/img_height/img_size 等字段）
+      - pic_urls: 纯图片链接列表（协议相对地址 // 已补全为 https:）
+    无配图、content 为字符串或无 pictures 字段时，安全返回 ([], [])。
+    """
+    content = item.get('content', '')
+    if not isinstance(content, dict):
+        return [], []
+    raw_pics = content.get('pictures') or []
+    pictures = []
+    pic_urls = []
+    for p in raw_pics:
+        if not isinstance(p, dict):
+            continue
+        obj = dict(p)
+        src = obj.get('img_src', '') or ''
+        if src.startswith('//'):
+            src = 'https:' + src
+        obj['img_src'] = src
+        pictures.append(obj)
+        if src:
+            pic_urls.append(src)
+    return pictures, pic_urls
+
+
 
 def parse_comment(r: dict, oid: int) -> dict:
-    """API返回 → 统一评论格式"""
+    """API返回 → 统一评论格式（v3.3.6：额外保留正文配图）"""
+    _pictures, _pic_urls = extract_pictures(r)
     return {
         'rpid': r.get('rpid', 0),
         'oid': oid,
@@ -387,6 +424,8 @@ def parse_comment(r: dict, oid: int) -> dict:
         'uid': str(r.get('member', {}).get('mid', '')),
         'level': r.get('member', {}).get('level_info', {}).get('current_level', 0),
         'message': extract_message(r),
+        'pictures': _pictures,
+        'pic_urls': _pic_urls,
         'like': r.get('like', 0),
         'ctime': r.get('ctime', 0),
         'rcount': r.get('rcount', 0),
@@ -971,6 +1010,8 @@ def tree_to_text_lines(node: dict, indent: str = '', is_last: bool = True,
         lines.append(f"⭐ 根评论 [{node['uname']}] (Lv.{node['level']}) "
                      f"{ts_to_str(node['ctime'])}")
         lines.append(f"「{node['message']}」")
+        for pic_url in node.get('pic_urls', []):
+            lines.append(f"🖼 {pic_url}")
         if node.get('rcount', 0) > 0:
             lines.append(f"💬 {node['rcount']} 条回复")
         if node.get('children'):
@@ -981,6 +1022,8 @@ def tree_to_text_lines(node: dict, indent: str = '', is_last: bool = True,
         prefix = '└── ' if is_last else '├── '
         lines.append(f"{indent}{prefix}[{node['uname']}] → {node['message']} "
                      f"({ts_to_str(node['ctime'])}, 👍{node['like']})")
+        for pic_url in node.get('pic_urls', []):
+            lines.append(f"{indent}    🖼 {pic_url}")
         if node.get('children'):
             new_indent = indent + ('    ' if is_last else '│   ')
             for i, child in enumerate(node['children']):
@@ -995,12 +1038,16 @@ def flat_to_text_lines(root_comment: dict, replies: list) -> list[str]:
         f"⭐ 根评论 [{root_comment['uname']}] (Lv.{root_comment['level']}) "
         f"{ts_to_str(root_comment['ctime'])}",
         f"「{root_comment['message']}」",
-        f"{'─'*50}",
     ]
+    for pic_url in root_comment.get('pic_urls', []):
+        lines.append(f"🖼 {pic_url}")
+    lines.append(f"{'─'*50}")
     for r in sorted(replies, key=lambda x: x['ctime']):
         depth = '[二级]' if r['parent'] == root_comment['rpid'] else '[三级+]'
         lines.append(f"  {depth} [{r['uname']}] → {r['message']} "
                      f"({ts_to_str(r['ctime'])}, 👍{r['like']})")
+        for pic_url in r.get('pic_urls', []):
+            lines.append(f"    🖼 {pic_url}")
     return lines
 
 
@@ -1024,6 +1071,7 @@ def get_root_comment_info(session: requests.Session, aid: int,
         'root': 0, 'parent': 0,
         'uname': '(未知用户)', 'uid': '', 'level': 0,
         'message': '(根评论详情获取失败，可能已被删除)',
+        'pictures': [], 'pic_urls': [],
         'like': 0, 'ctime': 0, 'rcount': 0,
     }
 
@@ -1051,6 +1099,8 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
     json_path = os.path.join(output_dir, f'comments_{bvid}_{tag}_{ts}.json')
     txt_path = os.path.join(output_dir, f'comments_{bvid}_{tag}_{ts}.txt')
 
+    pic_comments = sum(1 for c in all_comments if c.get('pic_urls'))
+    pic_total = sum(len(c.get('pic_urls', [])) for c in all_comments)
     result = {
         'video': video_info,
         'stats': {
@@ -1058,6 +1108,8 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
             'root': root_count,
             'sub': sub_count,
             'users': len(uc),
+            'pic_comments': pic_comments,
+            'pic_total': pic_total,
         },
         'comments': all_comments,
     }
@@ -1068,6 +1120,7 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
         f.write(f"视频: {video_info.get('title','?')}  BVID: {bvid}\n")
         f.write(f"排序: {sort_label}  总{len(all_comments)}条 "
                 f"(一级{root_count} + 楼中楼{sub_count})  用户{len(uc)}人\n")
+        f.write(f"含图评论: {pic_comments}条  图片总数: {pic_total}张\n")
         f.write("=" * 70 + "\n\n")
         for c in all_comments:
             tag_c = '[楼中楼]' if c['root'] != 0 else '[一级]'
@@ -1075,6 +1128,8 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
             f.write(f"{indent}{tag_c} [{c['uname']}] Lv.{c['level']} "
                     f"{ts_to_str(c['ctime'])} 👍{c['like']}\n")
             f.write(f"{indent}  {c['message']}\n")
+            for pic_url in c.get('pic_urls', []):
+                f.write(f"{indent}  🖼 {pic_url}\n")
             f.write(f"{indent}  rpid={c['rpid']} root={c['root']} parent={c['parent']}\n\n")
 
     print(f"\n{'='*55}")
@@ -1105,6 +1160,10 @@ def output_mode3(root_comment: dict, replies: list, tree_root: dict,
         txt_lines = flat_to_text_lines(root_comment, replies)
         tag = 'flat'
 
+    all_nodes = [root_comment] + list(replies)
+    pic_comments = sum(1 for c in all_nodes if c.get('pic_urls'))
+    pic_total = sum(len(c.get('pic_urls', [])) for c in all_nodes)
+
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     json_path = os.path.join(output_dir, f'replies_{bvid}_root{root_rpid}_{tag}_{ts}.json')
     txt_path = os.path.join(output_dir, f'replies_{bvid}_root{root_rpid}_{tag}_{ts}.txt')
@@ -1113,7 +1172,9 @@ def output_mode3(root_comment: dict, replies: list, tree_root: dict,
         json.dump({
             'video': video_info,
             'root_comment': root_comment,
-            'stats': {'total_replies': len(replies)},
+            'stats': {'total_replies': len(replies),
+                      'pic_comments': pic_comments,
+                      'pic_total': pic_total},
             'replies_flat': replies,
             'reply_tree': tree_root,
             'display_mode': display_mode,
@@ -1122,6 +1183,7 @@ def output_mode3(root_comment: dict, replies: list, tree_root: dict,
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write(f"视频: {video_info.get('title','?')}  BVID: {bvid}\n")
         f.write(f"根评论rpid: {root_rpid}  楼中楼: {len(replies)}条  展示: {display_mode}\n")
+        f.write(f"含图评论: {pic_comments}条  图片总数: {pic_total}张\n")
         f.write("=" * 60 + "\n\n")
         f.write('\n'.join(txt_lines))
 
@@ -1146,7 +1208,7 @@ def print_banner():
     banner = """
 ╔══════════════════════════════════════════════════╗
 ║     🎯  评论爬取                                ║
-║     B站视频评论爬虫 · 交互式脚本 v3.3.5        ║
+║     B站视频评论爬虫 · 交互式脚本 v3.3.6        ║
 ║                                                  ║
 ║  模式1 · 全量爬取（一级评论 + 全部楼中楼）      ║
 ║  模式2 · 仅一级评论                             ║
