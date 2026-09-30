@@ -1,6 +1,6 @@
-# Bili Comment Crawler
+# Bilibili Comment Crawler
 
-交互式 B 站视频评论爬取脚本（当前版本 v3.3.5）。按终端提示依次选择模式、输入参数即可，无需修改代码。
+交互式 B 站视频评论爬取脚本。按终端提示依次选择模式、输入参数即可。
 
 ## 功能特性
 
@@ -12,6 +12,7 @@
 - 模式 3 支持树形 / 时间顺序展示，可连续爬取多个楼层
 - 支持纯 BV 号、完整链接、b23.tv 短链接（自动解析）输入
 - 模式 3 支持直接粘贴评论区评论链接，自动识别 BV 号与楼主 id（root_rpid）
+- **保留评论正文配图**：JSON 输出 `pictures` / `pic_urls`，TXT 正文后追加图片链接，并统计含图评论数与图片总数
 - 输出按视频标题自动归档到独立文件夹；view 接口完整信息存为 `信息.md`
 - **自动读取本目录 `bilicookie.txt`（单行裸 Cookie），免手动输入；文件缺失时回退手动粘贴**
 - 每次输出 JSON + TXT；三种速度预设；Cookie 自动检测；可选 tqdm 进度条
@@ -87,18 +88,25 @@ python bilicmtcrawl.py
 
 - `信息.md` 每次运行覆盖为最新快照；评论与检查点文件追加累积、互不覆盖
 - JSON 为完整结构化数据，TXT 为可读文本
+- 评论正文配图：JSON 保留完整图片对象，TXT 在正文后追加 `🖼 图片链接`（仅 URL）
 
 JSON 结构（模式 1/2）：
 
 ```json
 {
   "video": {"aid": 123, "bvid": "BV...", "title": "标题"},
-  "stats": {"total": 1523, "root": 847, "sub": 676, "users": 523},
+  "stats": {"total": 1523, "root": 847, "sub": 676, "users": 523,
+            "pic_comments": 42, "pic_total": 57},
   "comments": [
     {
       "rpid": 1234567890, "oid": 123, "root": 0, "parent": 0,
       "uname": "用户名", "uid": "12345678", "level": 6,
-      "message": "评论内容", "like": 123, "ctime": 1705312200, "rcount": 5
+      "message": "评论内容",
+      "pictures": [
+        {"img_src": "https://...", "img_width": 1080, "img_height": 1440, "img_size": 123456}
+      ],
+      "pic_urls": ["https://..."],
+      "like": 123, "ctime": 1705312200, "rcount": 5
     }
   ]
 }
@@ -113,9 +121,13 @@ JSON 结构（模式 1/2）：
 | uname / uid | 用户名 / 用户 UID |
 | level | 用户等级 |
 | message | 评论内容（JSON 中始终完整） |
+| pictures | 评论正文配图原始对象列表（img_src / img_width / img_height / img_size），无图为 `[]` |
+| pic_urls | 评论正文纯图片链接列表（协议相对地址 `//` 已补全为 `https:`），无图为 `[]` |
 | like | 点赞数 |
 | ctime | 发布时间（Unix 时间戳） |
 | rcount | 楼中楼回复数（仅一级评论） |
+
+> `stats` 中 `pic_comments` 为含图评论数，`pic_total` 为图片总数；模式 3 的 JSON/TXT 头部同样含此两项统计。
 
 ## 断点续传
 
@@ -134,6 +146,7 @@ JSON 结构（模式 1/2）：
 - **怎么找 root_rpid**：粘贴评论链接自动识别 / 模式 2 搜 JSON / 手动输入数字
 - **中断了怎么办**：直接重跑，自动从检查点恢复
 - **评论内容被截断？**：终端与 TXT 按“字素簇”安全截断（避免劈开 emoji），JSON 的 `message` 始终完整
+- **评论配图在哪？**：JSON 的 `pictures`（完整对象）+ `pic_urls`（纯链接）；TXT 正文后有 `🖼` 链接行
 - **Windows 颜色异常**：使用 PowerShell / Windows Terminal / VS Code 终端
 - **模式 3 粘贴链接后还要输数字吗**：链接含 `comment_root_id=` 或 `#reply` 时直接回车即可
 - **不想每次手动输入 Cookie？**：把 Cookie 存到同目录 `bilicookie.txt`（一行裸 Cookie），自动读取；删除或改名该文件即恢复手动输入
@@ -170,6 +183,7 @@ JSON 结构（模式 1/2）：
 | 一级评论上限 | 500 页 × 20 条 = 10000 条 |
 | 楼中楼上限 | 100 页 × 20 条 = 2000 条/楼层 |
 | 评论链接解析 | `comment_root_id=` → `#reply` → 纯数字 |
+| 评论配图 | 取自 `content.pictures`，保留原始对象；`//` 相对地址补全为 `https:` |
 | Wbi 密钥 | 缓存于 session，签名错误（-412）时自动刷新 |
 | 输出目录 | 按视频标题自动命名，view 完整信息存为 `信息.md` |
 
