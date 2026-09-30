@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     B站视频评论爬取 · 交互式整合脚本 v3.3.6              ║
+║     B站视频评论爬取 · 交互式整合脚本 v3.3.8              ║
 ║     （Bili Comment Crawler）                              ║
 ║                                                            ║
 ║  模式1 - 全量爬取（一级评论 + 所有楼中楼）                  ║
@@ -12,6 +12,22 @@
 ║  特性：断点续传 · Wbi签名 · 反风控 · 回复树构建             ║
 ║        Cookie自动读取bilicookie.txt · 输出按视频标题归档    ║
 ╚══════════════════════════════════════════════════════════════╝
+
+v3.3.8 变更记录：
+  - 修复：模式3（及模式1失败重试）在爬取结束后的交互等待时间
+          被计入“总耗时”，显示值远大于真实爬取时间
+  - 改进：新增 timed_input() 统一包装输入，自动累计等待秒数
+  - 改进：总耗时 = 实际耗时 − 用户输入等待（只反映真实爬取时间）
+
+v3.3.7 变更记录：
+  - 修复：API 返回非零 code 时被误当正常响应（可能漏爬或崩溃），改为返回 None
+  - 修复：请求过于频繁(-509) 纳入自动重试
+  - 改进：用户去重改用 uid（为空回退 uname）
+  - 改进：输出文件名排序改用短标签（time / hot / reply）
+  - 改进：模式1 一级评论检查点推迟到全流程成功后清理
+  - 改进：模式3 的 replies_flat 不再携带 children 字段
+  - 清理：移除 fetch_all_replies 中的无效循环
+  - 文案/注释：投稿时间、一级评论计数、Cookie 引号说明、步骤编号统一
 
 v3.3.6 变更记录：
   - 新增评论正文配图（content.pictures）：不再丢弃图片链接
@@ -105,6 +121,21 @@ def cprint(color_func, text):
     """带颜色打印"""
     print(color_func(text))
 
+
+# --- 用户交互等待计时（v3.3.8）---
+# 累计“等待用户输入”的秒数，用于从总耗时中扣除，使显示值只反映真实爬取时间。
+_USER_WAIT = {'total': 0.0}
+
+
+def timed_input(prompt: str = '') -> str:
+    """包装内置 input()：记录用户输入的等待时长，累计到 _USER_WAIT。"""
+    _t0 = time.time()
+    try:
+        return input(prompt)
+    finally:
+        _USER_WAIT['total'] += time.time() - _t0
+
+
 # ============================================================
 # 全局常量
 # ============================================================
@@ -133,9 +164,9 @@ MAX_PAGES = 500
 MAX_SUB_PAGES = 100
 
 SORT_OPTIONS = {
-    '1': {'label': '🕐 时间排序（最新在前，翻页上限最高，推荐全量爬取）', 'sort': 0, 'nohot': 1},
-    '2': {'label': '🔥 热度排序（点赞最多在前，翻页有上限）',           'sort': 1, 'nohot': 0},
-    '3': {'label': '💬 回复数排序（讨论最热烈在前）',                   'sort': 2, 'nohot': 0},
+    '1': {'label': '🕐 时间排序（最新在前，翻页上限最高，推荐全量爬取）', 'sort': 0, 'nohot': 1, 'tag': 'time'},
+    '2': {'label': '🔥 热度排序（点赞最多在前，翻页有上限）',           'sort': 1, 'nohot': 0, 'tag': 'hot'},
+    '3': {'label': '💬 回复数排序（讨论最热烈在前）',                   'sort': 2, 'nohot': 0, 'tag': 'reply'},
 }
 
 SPEED_OPTIONS = {
@@ -177,7 +208,7 @@ def load_cookie_from_file(filename: str = 'bilicookie.txt') -> str | None:
     文件仅包含一行裸 Cookie，无任何标识；自动兼容处理：
       - 以 UTF-8 读取（容忍 BOM）
       - 剥离可选的 "Cookie:" 前缀
-      - 剥离首尾引号
+      - 剥离首尾双引号（单引号不处理）
     文件不存在、内容为空或读取失败时返回 None。
     """
     if not os.path.exists(filename):
@@ -345,11 +376,20 @@ def request_wbi(session: requests.Session, url: str, params: dict,
                 cprint(Ansi.red, "  ❌ Cookie过期(-101)，请重新获取Cookie")
                 return None
 
+            # ── 请求过于频繁(-509) ──
+            if d.get('code') == -509:
+                wait = 5 * (attempt + 1) + random.uniform(0, 2)
+                if not silent:
+                    cprint(Ansi.yellow,
+                           f"  ⚠ 请求过于频繁(-509)，等待{wait:.1f}s ({attempt+1}/{retries})")
+                time.sleep(wait)
+                continue
+
             # ── 其他API错误 ──
             if not silent:
                 cprint(Ansi.yellow,
                        f"  ⚠ API返回 code={d.get('code')} msg={d.get('message','?')}")
-            return d
+            return None
 
         except requests.exceptions.Timeout:
             last_error = "超时"
@@ -453,6 +493,11 @@ def _is_variation_selector(cp: int) -> bool:
     return 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF
 
 
+def _is_emoji_modifier(cp: int) -> bool:
+    """判断码点是否为 emoji 肤色修饰符（U+1F3FB–U+1F3FF，如 👍🏽）"""
+    return 0x1F3FB <= cp <= 0x1F3FF
+
+
 def _truncate_grapheme(text: str, max_len: int) -> str:
     """
     按“字素簇”（grapheme cluster）安全截断文本（不附加省略号），
@@ -460,6 +505,7 @@ def _truncate_grapheme(text: str, max_len: int) -> str:
       - 组合字符（如 é = e + U+0301）
       - ZWJ/ZWNJ 连接的表情序列（如 👨‍👩‍👧‍👦）
       - 变体选择符（如 ❤️ = ❤ + U+FE0F）
+      - emoji 肤色修饰符（如 👍🏽 = 👍 + U+1F3FD）
       - 代理对（Python3 正常 str 不会出现，保留防御性处理）
     文本不超长时原样返回。
     """
@@ -475,7 +521,8 @@ def _truncate_grapheme(text: str, max_len: int) -> str:
     while cut > 0 and cut < len(chars):
         nxt = ord(chars[cut])
         prev = ord(chars[cut - 1])
-        if _is_combining_mark(nxt) or _is_variation_selector(nxt):
+        if (_is_combining_mark(nxt) or _is_variation_selector(nxt)
+                or _is_emoji_modifier(nxt)):
             cut -= 1
             continue
         if prev in (0x200C, 0x200D):
@@ -666,7 +713,7 @@ def save_view_info_md(output_dir: str, view: dict, video_info: dict):
         ('UP主', f"{owner.get('name', '')} (mid={owner.get('mid', '')})"),
         ('UP主头像', owner.get('face', '')),
         ('发布时间', ts_to_str(data.get('pubdate', 0))),
-        ('审核时间', ts_to_str(data.get('ctime', 0))),
+        ('投稿时间', ts_to_str(data.get('ctime', 0))),
         ('时长', dur_str),
         ('分P数', data.get('videos', '')),
         ('封面', data.get('pic', '')),
@@ -742,7 +789,7 @@ def fetch_root_comments(session: requests.Session, aid: int,
                         checkpoint_file: str) -> tuple[list, int]:
     """
     逐页拉取一级评论（支持断点续传与进度打印）。
-    返回 (评论列表, 全站显示总评论数)；总数为0表示接口未给出。
+    返回 (评论列表, 接口报告的一级评论计数)；计数为0表示接口未给出。
     """
     all_comments = []
     page = 1
@@ -850,9 +897,6 @@ def fetch_all_replies(session: requests.Session, aid: int,
     all_data = list(root_comments)
 
     already_checked_rpids = set()
-    for c in all_data:
-        if c['root'] != 0:
-            already_checked_rpids.add(c['root'])
 
     ckpt = load_checkpoint(checkpoint_file)
     done_rpids = set()
@@ -1081,7 +1125,7 @@ def get_root_comment_info(session: requests.Session, aid: int,
 # ============================================================
 
 def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
-                       sort_label: str, output_dir: str):
+                       sort_label: str, output_dir: str, sort_tag: str = 'time'):
     """
     输出模式1/模式2的爬取结果：按时间倒序排序后写入 JSON 与 TXT 文件，并打印汇总。
     JSON 含视频信息、统计（总数/一级/楼中楼/去重用户数）与全部评论。
@@ -1091,10 +1135,9 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
     root_count = sum(1 for c in all_comments if c['root'] == 0)
     sub_count = sum(1 for c in all_comments if c['root'] != 0)
 
-    uc = Counter(c['uname'] for c in all_comments)
+    uc = Counter((c['uid'] or c['uname']) for c in all_comments)
 
-    tag = sort_label.replace(' ', '_').replace('🕐', '').replace('🔥', '').replace('💬', '')
-    tag = tag.strip('_') or 'time'
+    tag = sort_tag or 'time'
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     json_path = os.path.join(output_dir, f'comments_{bvid}_{tag}_{ts}.json')
     txt_path = os.path.join(output_dir, f'comments_{bvid}_{tag}_{ts}.txt')
@@ -1168,6 +1211,7 @@ def output_mode3(root_comment: dict, replies: list, tree_root: dict,
     json_path = os.path.join(output_dir, f'replies_{bvid}_root{root_rpid}_{tag}_{ts}.json')
     txt_path = os.path.join(output_dir, f'replies_{bvid}_root{root_rpid}_{tag}_{ts}.txt')
 
+    replies_flat = [{k: v for k, v in r.items() if k != 'children'} for r in replies]
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump({
             'video': video_info,
@@ -1175,7 +1219,7 @@ def output_mode3(root_comment: dict, replies: list, tree_root: dict,
             'stats': {'total_replies': len(replies),
                       'pic_comments': pic_comments,
                       'pic_total': pic_total},
-            'replies_flat': replies,
+            'replies_flat': replies_flat,
             'reply_tree': tree_root,
             'display_mode': display_mode,
         }, f, ensure_ascii=False, indent=2)
@@ -1208,7 +1252,7 @@ def print_banner():
     banner = """
 ╔══════════════════════════════════════════════════╗
 ║     🎯  评论爬取                                ║
-║     B站视频评论爬虫 · 交互式脚本 v3.3.6        ║
+║     B站视频评论爬虫 · 交互式脚本 v3.3.8        ║
 ║                                                  ║
 ║  模式1 · 全量爬取（一级评论 + 全部楼中楼）      ║
 ║  模式2 · 仅一级评论                             ║
@@ -1246,7 +1290,7 @@ def select_mode() -> int:
     """)
     while True:
         try:
-            choice = input(f"  {Ansi.bold('请输入 [1/2/3]')}: ").strip()
+            choice = timed_input(f"  {Ansi.bold('请输入 [1/2/3]')}: ").strip()
             if choice in ('1', '2', '3'):
                 return int(choice)
             cprint(Ansi.yellow, "  ⚠ 请输入 1、2 或 3")
@@ -1290,10 +1334,10 @@ def input_cookie_interactive() -> str:
     while True:
         try:
             if first:
-                line = input("  Cookie: ").strip()
+                line = timed_input("  Cookie: ").strip()
                 first = False
             else:
-                line = input("         ").strip()
+                line = timed_input("         ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n")
             sys.exit(0)
@@ -1327,7 +1371,7 @@ def input_bvid_interactive() -> tuple[str, int | None]:
     """)
     while True:
         try:
-            raw = input(f"  {Ansi.bold('BVID')}: ").strip()
+            raw = timed_input(f"  {Ansi.bold('BVID')}: ").strip()
             bvid = extract_bvid(raw)
             if bvid:
                 link_rpid = extract_root_rpid(raw)
@@ -1343,24 +1387,25 @@ def input_bvid_interactive() -> tuple[str, int | None]:
             sys.exit(0)
 
 
-def select_speed() -> tuple:
+def select_speed(step: int = 5) -> tuple:
     """
     交互选择爬取速度。
     返回 (main_min, main_max, sub_min, sub_max)；选择快速模式需二次确认。
+    step 为展示用步骤编号（模式1/2 为 5，模式3 为 6）。
     """
-    print(Ansi.bold("\n📌 爬取速度设置"))
+    print(Ansi.bold(f"\n📌 步骤{step}：爬取速度设置"))
     print("─" * 45)
     for k, v in SPEED_OPTIONS.items():
         print(f"  {Ansi.cyan(f'[{k}]')}  {v['label']}")
     print(f"\n  {Ansi.dim('💡 慢速最安全但耗时最长；正常适合大多数场景')}")
     while True:
         try:
-            choice = input(f"  {Ansi.bold('请输入 [1/2/3]')}: ").strip()
+            choice = timed_input(f"  {Ansi.bold('请输入 [1/2/3]')}: ").strip()
             if choice in SPEED_OPTIONS:
                 opt = SPEED_OPTIONS[choice]
                 if choice == '1':
                     cprint(Ansi.yellow, "  ⚠ 快速模式请求较密集，可能被限流，确认继续？")
-                    confirm = input(f"  {Ansi.bold('确认？[y/n]')}: ").strip().lower()
+                    confirm = timed_input(f"  {Ansi.bold('确认？[y/n]')}: ").strip().lower()
                     if confirm != 'y':
                         continue
                 return opt['main_min'], opt['main_max'], opt['sub_min'], opt['sub_max']
@@ -1370,8 +1415,8 @@ def select_speed() -> tuple:
             sys.exit(0)
 
 
-def select_sort() -> tuple[int, int, str]:
-    """交互选择排序方式，返回 (sort, nohot, 显示标签)。非时间排序会先确认。"""
+def select_sort() -> tuple[int, int, str, str]:
+    """交互选择排序方式，返回 (sort, nohot, 显示标签, 短标签)。非时间排序会先确认。"""
     print(Ansi.bold("\n📌 步骤4：选择排序方式"))
     print("─" * 45)
     for k, v in SORT_OPTIONS.items():
@@ -1379,16 +1424,16 @@ def select_sort() -> tuple[int, int, str]:
     print(f"\n  {Ansi.dim('💡 全量爬取推荐选[1]时间排序，翻页上限最高')}")
     while True:
         try:
-            choice = input(f"  {Ansi.bold('请输入 [1/2/3]')}: ").strip()
+            choice = timed_input(f"  {Ansi.bold('请输入 [1/2/3]')}: ").strip()
             if choice in SORT_OPTIONS:
                 opt = SORT_OPTIONS[choice]
                 if choice != '1':
                     cprint(Ansi.yellow,
                            f"  ⚠ 注意：{opt['label'].split('（')[1].rstrip('）')}")
-                    confirm = input(f"  {Ansi.bold('确认继续？[y/n]')}: ").strip().lower()
+                    confirm = timed_input(f"  {Ansi.bold('确认继续？[y/n]')}: ").strip().lower()
                     if confirm != 'y':
                         continue
-                return opt['sort'], opt['nohot'], opt['label']
+                return opt['sort'], opt['nohot'], opt['label'], opt.get('tag', 'time')
             cprint(Ansi.yellow, "  ⚠ 请输入 1、2 或 3")
         except (EOFError, KeyboardInterrupt):
             print("\n")
@@ -1418,7 +1463,7 @@ def input_root_rpid_interactive(default_rpid: int | None = None) -> int:
             if default_rpid:
                 cprint(Ansi.dim,
                        f"  💡 已从链接识别到楼主id: {Ansi.green(str(default_rpid))}，直接回车使用")
-            raw = input(f"  {Ansi.bold('root_rpid')}: ").strip()
+            raw = timed_input(f"  {Ansi.bold('root_rpid')}: ").strip()
             if raw == '' and default_rpid:
                 return default_rpid
             rpid = extract_root_rpid(raw)
@@ -1446,7 +1491,7 @@ def select_display_mode() -> str:
     """)
     while True:
         try:
-            choice = input(f"  {Ansi.bold('请输入 [1/2]')}: ").strip()
+            choice = timed_input(f"  {Ansi.bold('请输入 [1/2]')}: ").strip()
             if choice in DISPLAY_OPTIONS:
                 return DISPLAY_OPTIONS[choice]['mode']
             cprint(Ansi.yellow, "  ⚠ 请输入 1 或 2")
@@ -1474,7 +1519,7 @@ def show_summary_and_confirm(mode: int, bvid: str, **kwargs) -> bool:
     print(f"{'─'*45}")
 
     try:
-        confirm = input(f"  {Ansi.bold('确认开始爬取？[y/n]')}: ").strip().lower()
+        confirm = timed_input(f"  {Ansi.bold('确认开始爬取？[y/n]')}: ").strip().lower()
         return confirm == 'y'
     except (EOFError, KeyboardInterrupt):
         print("\n")
@@ -1497,9 +1542,9 @@ def main():
 
     bvid, link_rpid = input_bvid_interactive()
 
-    sort_type, nohot, sort_label = 0, 1, SORT_OPTIONS['1']['label']
+    sort_type, nohot, sort_label, sort_tag = 0, 1, SORT_OPTIONS['1']['label'], SORT_OPTIONS['1']['tag']
     if mode in (1, 2):
-        sort_type, nohot, sort_label = select_sort()
+        sort_type, nohot, sort_label, sort_tag = select_sort()
 
     root_rpid = None
     display_mode = 'tree'
@@ -1509,7 +1554,7 @@ def main():
         display_mode = select_display_mode()
 
     # ── 速度选择 ──
-    main_min, main_max, sub_min, sub_max = select_speed()
+    main_min, main_max, sub_min, sub_max = select_speed(5 if mode in (1, 2) else 6)
     global MAIN_DELAY_MIN, MAIN_DELAY_MAX, SUB_DELAY_MIN, SUB_DELAY_MAX
     MAIN_DELAY_MIN, MAIN_DELAY_MAX = main_min, main_max
     SUB_DELAY_MIN, SUB_DELAY_MAX = sub_min, sub_max
@@ -1553,6 +1598,7 @@ def main():
     save_view_info_md(output_dir, view, video_info)
     cprint(Ansi.cyan, f"  📁 保存目录: {output_dir}")
 
+    _USER_WAIT['total'] = 0.0
     start_time = time.time()
 
     if mode == 1:
@@ -1570,7 +1616,7 @@ def main():
             cprint(Ansi.red, "❌ 未获取到任何一级评论")
             sys.exit(1)
         if total_count > 0:
-            cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条（全站显示约 {total_count} 条）")
+            cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条（接口报告约 {total_count} 条）")
         else:
             cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条")
         remove_checkpoint(ckpt_root)
@@ -1590,7 +1636,7 @@ def main():
                     print(f"     rpid={rp}  ({name})")
                 print(f"\n  {Ansi.dim('可能原因：网络波动或B站临时限流，建议稍后重试')}")
                 try:
-                    retry = input(f"  {Ansi.bold('是否重新爬取这些楼层？[y/n]')}: ").strip().lower()
+                    retry = timed_input(f"  {Ansi.bold('是否重新爬取这些楼层？[y/n]')}: ").strip().lower()
                 except (EOFError, KeyboardInterrupt):
                     print()
                     break
@@ -1614,7 +1660,8 @@ def main():
             cprint(Ansi.dim, "\nℹ️  所有一级评论均无楼中楼")
             all_comments = list(root_comments)
 
-        output_mode1_mode2(all_comments, video_info, bvid, sort_label, output_dir)
+        remove_checkpoint(ckpt_root)
+        output_mode1_mode2(all_comments, video_info, bvid, sort_label, output_dir, sort_tag)
 
     elif mode == 2:
         # ═══ 模式2：仅一级评论 ═══
@@ -1630,10 +1677,10 @@ def main():
             sys.exit(1)
         remove_checkpoint(ckpt_root)
         if total_count > 0:
-            cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条（全站显示约 {total_count} 条）")
+            cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条（接口报告约 {total_count} 条）")
         else:
             cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条")
-        output_mode1_mode2(root_comments, video_info, bvid, sort_label, output_dir)
+        output_mode1_mode2(root_comments, video_info, bvid, sort_label, output_dir, sort_tag)
 
     elif mode == 3:
         # ═══ 模式3：指定楼层 ═══
@@ -1653,7 +1700,7 @@ def main():
                    f"\n  ⚠ root={root_rpid} 的楼中楼数据可能不完整（已获取 {len(replies)} 条）")
             print(f"  {Ansi.dim('可能原因：网络波动或B站临时限流')}")
             try:
-                retry = input(f"  {Ansi.bold('是否重新爬取？[y/n]')}: ").strip().lower()
+                retry = timed_input(f"  {Ansi.bold('是否重新爬取？[y/n]')}: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -1677,7 +1724,7 @@ def main():
         # 模式3：询问是否继续爬取其他楼层
         print()
         try:
-            again = input(f"  {Ansi.bold('是否继续爬取另一个楼层？[y/n]')}: ").strip().lower()
+            again = timed_input(f"  {Ansi.bold('是否继续爬取另一个楼层？[y/n]')}: ").strip().lower()
             while again == 'y':
                 new_rpid = input_root_rpid_interactive()
                 new_display = select_display_mode()
@@ -1692,7 +1739,7 @@ def main():
                                f"\n  ⚠ root={new_rpid} 的楼中楼数据可能不完整（已获取 {len(rp)} 条）")
                         print(f"  {Ansi.dim('可能原因：网络波动或B站临时限流')}")
                         try:
-                            retry2 = input(f"  {Ansi.bold('是否重新爬取？[y/n]')}: ").strip().lower()
+                            retry2 = timed_input(f"  {Ansi.bold('是否重新爬取？[y/n]')}: ").strip().lower()
                         except (EOFError, KeyboardInterrupt):
                             print()
                             break
@@ -1707,11 +1754,13 @@ def main():
 
                     tr = build_reply_tree(rc, rp)
                     output_mode3(rc, rp, tr, video_info, bvid, new_rpid, new_display, output_dir)
-                again = input(f"\n  {Ansi.bold('继续爬取其他楼层？[y/n]')}: ").strip().lower()
+                again = timed_input(f"\n  {Ansi.bold('继续爬取其他楼层？[y/n]')}: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             pass
 
-    elapsed = time.time() - start_time
+    elapsed = (time.time() - start_time) - _USER_WAIT['total']
+    if elapsed < 0:
+        elapsed = 0.0
     print(f"\n  ⏱ 总耗时: {elapsed:.0f}秒 ({elapsed/60:.1f}分钟)")
     cprint(Ansi.green, "  🎉 全部完成！")
 
