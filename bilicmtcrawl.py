@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     B站视频评论爬取 · 交互式整合脚本 v3.3.8              ║
+║     B站视频评论爬取 · 交互式整合脚本 v3.3.9              ║
 ║     （Bili Comment Crawler）                              ║
 ║                                                            ║
 ║  模式1 - 全量爬取（一级评论 + 所有楼中楼）                  ║
@@ -12,6 +12,15 @@
 ║  特性：断点续传 · Wbi签名 · 反风控 · 回复树构建             ║
 ║        Cookie自动读取bilicookie.txt · 输出按视频标题归档    ║
 ╚══════════════════════════════════════════════════════════════╝
+
+v3.3.9 变更记录：
+  - 修复（重要）：一级评论的置顶评论此前被完全漏抓
+      · 接口把置顶评论放在 data.top_replies / data.top(upper|admin)，
+        并不在 data.replies 中，且每页重复返回
+      · 现按 rpid 去重后并入一级评论；置顶楼层（模式1）的楼中楼也会被正常拉取
+      · 每条评论新增 is_top 字段（true=置顶），TXT 以 [置顶] 前缀标记
+      · JSON stats 与 TXT 头部新增「置顶评论」计数
+      · 楼中楼接口无置顶字段，模式3 不受影响
 
 v3.3.8 变更记录：
   - 修复：模式3（及模式1失败重试）在爬取结束后的交互等待时间
@@ -451,8 +460,8 @@ def extract_pictures(item: dict) -> tuple:
 
 
 
-def parse_comment(r: dict, oid: int) -> dict:
-    """API返回 → 统一评论格式（v3.3.6：额外保留正文配图）"""
+def parse_comment(r: dict, oid: int, is_top: bool = False) -> dict:
+    """API返回 → 统一评论格式（v3.3.6：配图；v3.3.9：标记置顶）"""
     _pictures, _pic_urls = extract_pictures(r)
     return {
         'rpid': r.get('rpid', 0),
@@ -469,6 +478,7 @@ def parse_comment(r: dict, oid: int) -> dict:
         'like': r.get('like', 0),
         'ctime': r.get('ctime', 0),
         'rcount': r.get('rcount', 0),
+        'is_top': is_top,
     }
 
 
@@ -784,11 +794,36 @@ def remove_checkpoint(filepath: str):
 # 一级评论翻页拉取（模式1 & 模式2共用）
 # ============================================================
 
+def _extract_top_items(data: dict) -> list:
+    """
+    从 /x/v2/reply 响应中提取置顶评论原始 item（v3.3.9 新增）。
+    置顶评论不包含在 data['replies'] 中，需单独并入；兼容两种形态：
+      - data['top_replies']  : 列表（实测每页重复返回）
+      - data['top']          : 字典 {admin: item|None, upper: item|None}
+    同一 rpid 只取一次，保持出现顺序。
+    """
+    dd = (data or {}).get('data') or {}
+    items, seen = [], set()
+
+    def _add(x):
+        if isinstance(x, dict) and x.get('rpid') and x['rpid'] not in seen:
+            seen.add(x['rpid'])
+            items.append(x)
+
+    for x in (dd.get('top_replies') or []):
+        _add(x)
+    top = dd.get('top')
+    if isinstance(top, dict):
+        for key in ('admin', 'upper'):
+            _add(top.get(key))
+    return items
+
+
 def fetch_root_comments(session: requests.Session, aid: int,
                         sort_type: int, nohot: int,
                         checkpoint_file: str) -> tuple[list, int]:
     """
-    逐页拉取一级评论（支持断点续传与进度打印）。
+    逐页拉取一级评论（支持断点续传与进度打印），并并入置顶评论（v3.3.9）。
     返回 (评论列表, 接口报告的一级评论计数)；计数为0表示接口未给出。
     """
     all_comments = []
@@ -801,6 +836,8 @@ def fetch_root_comments(session: requests.Session, aid: int,
         page = ckpt.get('page', 1)
         total_count_hint = ckpt.get('total_hint', 0)
         cprint(Ansi.cyan, f"  📂 从检查点恢复：已 {len(all_comments)} 条，从第 {page} 页继续")
+
+    seen_rpids = {c.get('rpid') for c in all_comments}
 
     while page <= MAX_PAGES:
         params = {
@@ -820,13 +857,32 @@ def fetch_root_comments(session: requests.Session, aid: int,
             })
             return all_comments, total_count_hint
 
-        replies = data.get('data', {}).get('replies', [])
+        replies = data.get('data', {}).get('replies', []) or []
+
+        # ── v3.3.9：并入置顶评论 ──
+        # 置顶不在 replies 中，且每页都会重复返回，故按 rpid 去重后并入
+        page_added = 0
+        for it in _extract_top_items(data):
+            if it.get('root', 0) != 0:
+                continue
+            rpid = it.get('rpid')
+            if rpid in seen_rpids:
+                continue
+            all_comments.append(parse_comment(it, aid, is_top=True))
+            seen_rpids.add(rpid)
+            page_added += 1
+
         if not replies:
             cprint(Ansi.green, f"  ✅ 第{page}页为空，翻页结束")
             break
 
         for r in replies:
+            rpid = r.get('rpid')
+            if rpid in seen_rpids:
+                continue
             all_comments.append(parse_comment(r, aid))
+            seen_rpids.add(rpid)
+            page_added += 1
 
         if total_count_hint == 0:
             total_count_hint = data.get('data', {}).get('page', {}).get('count', 0)
@@ -836,7 +892,7 @@ def fetch_root_comments(session: requests.Session, aid: int,
                 pct = f" ({len(all_comments)*100//total_count_hint}%)"
             else:
                 pct = ""
-            cprint(Ansi.dim, f"  📄 第{page}页 +{len(replies)}条 → 累计{len(all_comments)}条{pct}")
+            cprint(Ansi.dim, f"  📄 第{page}页 +{page_added}条 → 累计{len(all_comments)}条{pct}")
 
         page += 1
 
@@ -1117,6 +1173,7 @@ def get_root_comment_info(session: requests.Session, aid: int,
         'message': '(根评论详情获取失败，可能已被删除)',
         'pictures': [], 'pic_urls': [],
         'like': 0, 'ctime': 0, 'rcount': 0,
+        'is_top': False,
     }
 
 
@@ -1144,6 +1201,7 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
 
     pic_comments = sum(1 for c in all_comments if c.get('pic_urls'))
     pic_total = sum(len(c.get('pic_urls', [])) for c in all_comments)
+    top_count = sum(1 for c in all_comments if c.get('is_top'))
     result = {
         'video': video_info,
         'stats': {
@@ -1153,6 +1211,7 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
             'users': len(uc),
             'pic_comments': pic_comments,
             'pic_total': pic_total,
+            'top': top_count,
         },
         'comments': all_comments,
     }
@@ -1162,11 +1221,13 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write(f"视频: {video_info.get('title','?')}  BVID: {bvid}\n")
         f.write(f"排序: {sort_label}  总{len(all_comments)}条 "
-                f"(一级{root_count} + 楼中楼{sub_count})  用户{len(uc)}人\n")
+                f"(一级{root_count} + 楼中楼{sub_count})  用户{len(uc)}人  置顶{top_count}条\n")
         f.write(f"含图评论: {pic_comments}条  图片总数: {pic_total}张\n")
         f.write("=" * 70 + "\n\n")
         for c in all_comments:
             tag_c = '[楼中楼]' if c['root'] != 0 else '[一级]'
+            if c.get('is_top'):
+                tag_c = '[置顶]' + tag_c
             indent = '  ' if c['root'] != 0 else ''
             f.write(f"{indent}{tag_c} [{c['uname']}] Lv.{c['level']} "
                     f"{ts_to_str(c['ctime'])} 👍{c['like']}\n")
@@ -1177,7 +1238,7 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
 
     print(f"\n{'='*55}")
     cprint(Ansi.green, f"✅ 爬取完成！")
-    print(f"   总评论: {len(all_comments)}  一级: {root_count}  楼中楼: {sub_count}  用户: {len(uc)}人")
+    print(f"   总评论: {len(all_comments)}  一级: {root_count}  楼中楼: {sub_count}  用户: {len(uc)}人  置顶: {top_count}")
     print(f"   📄 {json_path}")
     print(f"   📄 {txt_path}")
 
@@ -1252,7 +1313,7 @@ def print_banner():
     banner = """
 ╔══════════════════════════════════════════════════╗
 ║     🎯  评论爬取                                ║
-║     B站视频评论爬虫 · 交互式脚本 v3.3.8        ║
+║     B站视频评论爬虫 · 交互式脚本 v3.3.9        ║
 ║                                                  ║
 ║  模式1 · 全量爬取（一级评论 + 全部楼中楼）      ║
 ║  模式2 · 仅一级评论                             ║
