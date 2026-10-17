@@ -207,7 +207,7 @@ JSON 结构（模式 1/2）：
 | 认证方式 | Wbi 签名（w_rid + wts）+ Cookie（SESSDATA，可经 bilicookie.txt 自动读取） |
 | 一级评论上限 | 接口 offset 上限 5000 → 最多 251 页 × 20 条 = 5020 条（置顶评论额外并入，不占此额度；本地 `MAX_PAGES=500` 仅作保护，撞到接口上限时正常输出并标注截断） |
 | 楼中楼上限 | 100 页 × 20 条 = 2000 条/楼层 |
-| 错误码处理 | 非零 code 视为失败返回 `None`（一级评论翻页的 `-400 max offset exceeded` 例外，视为接口到底）；`-412` 刷新 Wbi 重试；`-509` 退避重试；`-101` 提示退出 |
+| 错误码处理 | 非零 code 视为失败返回 `None`（一级评论翻页的 `-400` 例外：offset 已达上限或消息含 `max offset` 均视为接口到底，不依赖文案）；`-412` 刷新 Wbi 重试；`-509` 退避重试；`-101` 提示退出 |
 | 用户统计 | 按 `uid` 去重（空则回退 `uname`） |
 | 置顶评论 | 取自 `data.top_replies` 与 `data.top`（`admin`/`upper`），按 `rpid` 去重后并入；`data.replies` 中不含置顶 |
 | 评论链接解析 | `comment_root_id=` → `#reply` → 纯数字 |

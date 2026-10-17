@@ -264,9 +264,10 @@ def request_wbi(session: requests.Session, url: str, params: dict,
     """
     带Wbi签名的请求，内置重试与风控处理
     Wbi密钥缓存在 session 对象上，避免每次请求都调 nav 接口
-    max_offset_as_end=True 时，code=-400 且消息含 "max offset" 的响应
-    视为「翻页已到接口上限」而非失败，返回 {'code': -400, 'data': {}}；
-    其余 -400（如 ps out of bounds）仍按失败返回 None。
+    max_offset_as_end=True 时，code=-400 的响应视为「翻页已到接口上限」而非
+    失败，返回 {'code': -400, 'data': {}}：判定优先看本地 offset 是否已达
+    API_MAX_OFFSET（不依赖服务端文案），消息含 "max offset" 作为辅助判据；
+    offset 未达上限的 -400（如 ps out of bounds）仍按失败返回 None。
     """
     last_error = None
     for attempt in range(retries):
@@ -373,9 +374,26 @@ def request_wbi(session: requests.Session, url: str, params: dict,
                 continue
 
             # ── 翻页越过接口 offset 上限：视为「数据到底」，非网络失败 ──
-            if (max_offset_as_end and d.get('code') == -400
-                    and 'max offset' in str(d.get('message', '')).lower()):
-                return {'code': -400, 'message': d.get('message', ''), 'data': {}}
+            # 主判据是本地 offset，不依赖服务端文案：offset 已达 API_MAX_OFFSET 时，
+            # -400 只可能是越界。文案仅作辅助，未命中时打印原文便于发现文案变化。
+            if max_offset_as_end and d.get('code') == -400:
+                _msg = str(d.get('message', ''))
+                try:
+                    _off = (int(params.get('pn', 1)) - 1) * int(params.get('ps', 20))
+                except (TypeError, ValueError):
+                    _off = 0
+                if 'max offset' in _msg.lower():
+                    return {'code': -400, 'message': _msg, 'data': {}}
+                if _off >= API_MAX_OFFSET:
+                    if not silent:
+                        cprint(Ansi.yellow,
+                               f"  ⚠ -400 文案未命中哨兵（原文：{_msg!r}），"
+                               f"但 offset={_off} 已达上限 {API_MAX_OFFSET}，按数据到底处理")
+                    return {'code': -400, 'message': _msg, 'data': {}}
+                if not silent:
+                    cprint(Ansi.yellow,
+                           f"  ⚠ -400 且 offset={_off} < {API_MAX_OFFSET}，"
+                           f"原文：{_msg!r}，按普通错误处理")
 
             # ── 其他API错误 ──
             if not silent:
@@ -919,12 +937,11 @@ def fetch_root_comments(session: requests.Session, aid: int,
 
         if page % 10 == 1:
             pct = ""
-            # page.count 是「一级+楼中楼」总数，直接当分母会让进度永远偏低；
-            # 用「总数 - 已抓楼层的 rcount 之和」估算一级评论总量，仅作参考。
-            root_est = total_count_hint - sum(c.get('rcount', 0) or 0 for c in all_comments)
-            if total_count_hint > 0 and root_est > 0:
-                ratio = min(len(all_comments) * 100 // root_est, 100)
-                pct = f" / 预计{root_est}条 ({ratio}%)"
+            # page.count 是一级评论数（含楼中楼的 page.acount 数值更大），
+            # 直接作分母即可；再减去已抓 rcount 会压低分母，导致早期百分比虚高。
+            if total_count_hint > 0:
+                ratio = min(len(all_comments) * 100 // total_count_hint, 100)
+                pct = f" / 接口计数{total_count_hint}条 ({ratio}%)"
             cprint(Ansi.dim, f"  📄 第{page}页 +{page_added}条 → 累计{len(all_comments)}条{pct}")
 
         page += 1
