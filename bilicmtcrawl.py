@@ -127,8 +127,13 @@ USER_AGENTS = [
     'Mozilla/5.0 (Linux; Android 13; SM-G996B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6045.163 Mobile Safari/537.36',
 ]
 
+# 一级评论翻页：MAX_PAGES 是本地保护上限；接口本身在 offset 超过
+# API_MAX_OFFSET 时返回 code=-400 "max offset exceeded"，此时按「数据到底」
+# 处理（正常输出并标注截断），不视为网络失败。
 MAX_PAGES = 500
 MAX_SUB_PAGES = 100
+API_MAX_OFFSET = 5000
+API_MAX_ROOT_COMMENTS = (API_MAX_OFFSET // 20 + 1) * 20
 
 SORT_OPTIONS = {
     '1': {'label': '🕐 时间排序（最新在前，翻页上限最高，推荐全量爬取）', 'sort': 0, 'nohot': 1, 'tag': 'time'},
@@ -254,10 +259,14 @@ def get_wbi_keys(session: requests.Session) -> tuple | None:
 
 
 def request_wbi(session: requests.Session, url: str, params: dict,
-                retries: int = 5, silent: bool = False) -> dict | None:
+                retries: int = 5, silent: bool = False,
+                max_offset_as_end: bool = False) -> dict | None:
     """
     带Wbi签名的请求，内置重试与风控处理
     Wbi密钥缓存在 session 对象上，避免每次请求都调 nav 接口
+    max_offset_as_end=True 时，code=-400 且消息含 "max offset" 的响应
+    视为「翻页已到接口上限」而非失败，返回 {'code': -400, 'data': {}}；
+    其余 -400（如 ps out of bounds）仍按失败返回 None。
     """
     last_error = None
     for attempt in range(retries):
@@ -362,6 +371,11 @@ def request_wbi(session: requests.Session, url: str, params: dict,
                            f"  ⚠ 请求过于频繁(-509)，等待{wait:.1f}s ({attempt+1}/{retries})")
                 time.sleep(wait)
                 continue
+
+            # ── 翻页越过接口 offset 上限：视为「数据到底」，非网络失败 ──
+            if (max_offset_as_end and d.get('code') == -400
+                    and 'max offset' in str(d.get('message', '')).lower()):
+                return {'code': -400, 'message': d.get('message', ''), 'data': {}}
 
             # ── 其他API错误 ──
             if not silent:
@@ -726,6 +740,22 @@ def save_view_info_md(output_dir: str, view: dict, video_info: dict):
     cprint(Ansi.green, f"  📄 视频信息已保存: {md_path}")
 
 
+def append_info_md_note(output_dir: str, note: str):
+    """
+    在 <输出文件夹>/信息.md 末尾追加「本次抓取备注」。
+    信息.md 每次运行都会由 save_view_info_md 重新生成，
+    因此每次运行最多追加一次，不会跨运行累积。
+    """
+    md_path = os.path.join(output_dir, '信息.md')
+    if not os.path.exists(md_path):
+        return
+    try:
+        with open(md_path, 'a', encoding='utf-8') as f:
+            f.write('\n## 本次抓取备注\n\n' + note.strip() + '\n')
+    except Exception as e:
+        cprint(Ansi.yellow, f"  ⚠ 信息.md 备注写入失败: {e}")
+
+
 # ============================================================
 # 检查点（断点续传）
 # ============================================================
@@ -805,17 +835,19 @@ def _extract_top_items(data: dict) -> list:
 
 def fetch_root_comments(session: requests.Session, aid: int,
                         sort_type: int, nohot: int,
-                        checkpoint_file: str) -> tuple[list, int, bool]:
+                        checkpoint_file: str) -> tuple[list, int, bool, bool]:
     """
     逐页拉取一级评论（支持断点续传与进度打印），并并入置顶评论。
-    返回 (评论列表, 接口报告的一级评论计数, partial)；
-    计数为0表示接口未给出；partial=True 表示因请求失败或页数上限中途停止，
-    数据不完整。
+    返回 (评论列表, 接口报告的总评论计数, partial, truncated)；
+    计数为0表示接口未给出；partial=True 表示因请求失败或本地页数上限中途
+    停止，数据不完整；truncated=True 表示撞到接口 offset 上限
+    （pn*ps 超过 API_MAX_OFFSET），已抓数据即接口能给出的全部，可正常输出。
     """
     all_comments = []
     page = 1
     total_count_hint = 0
     partial = False
+    truncated = False
 
     ckpt = load_checkpoint(checkpoint_file)
     if ckpt:
@@ -835,14 +867,25 @@ def fetch_root_comments(session: requests.Session, aid: int,
             'sort': sort_type,
             'nohot': nohot,
         }
-        data = request_wbi(session, 'https://api.bilibili.com/x/v2/reply', params)
+        data = request_wbi(session, 'https://api.bilibili.com/x/v2/reply', params,
+                           max_offset_as_end=True)
 
         if data is None:
             cprint(Ansi.red, f"  ❌ 第{page}页请求失败，保存检查点退出")
             save_checkpoint(checkpoint_file, {
                 'comments': all_comments, 'page': page, 'total_hint': total_count_hint
             })
-            return all_comments, total_count_hint, True
+            return all_comments, total_count_hint, True, truncated
+
+        if data.get('code') == -400:
+            truncated = True
+            cprint(Ansi.yellow,
+                   f"  ⚠ 已到接口翻页上限（offset > {API_MAX_OFFSET}，第{page}页）："
+                   f"该接口最多返回前 {API_MAX_ROOT_COMMENTS} 条一级评论")
+            cprint(Ansi.yellow,
+                   f"     本次已获取 {len(all_comments)} 条，超出部分无法获取，"
+                   f"将按已获取数据正常输出")
+            break
 
         replies = data.get('data', {}).get('replies', []) or []
 
@@ -875,10 +918,13 @@ def fetch_root_comments(session: requests.Session, aid: int,
             total_count_hint = data.get('data', {}).get('page', {}).get('count', 0)
 
         if page % 10 == 1:
-            if total_count_hint > 0:
-                pct = f" ({len(all_comments)*100//total_count_hint}%)"
-            else:
-                pct = ""
+            pct = ""
+            # page.count 是「一级+楼中楼」总数，直接当分母会让进度永远偏低；
+            # 用「总数 - 已抓楼层的 rcount 之和」估算一级评论总量，仅作参考。
+            root_est = total_count_hint - sum(c.get('rcount', 0) or 0 for c in all_comments)
+            if total_count_hint > 0 and root_est > 0:
+                ratio = min(len(all_comments) * 100 // root_est, 100)
+                pct = f" / 预计{root_est}条 ({ratio}%)"
             cprint(Ansi.dim, f"  📄 第{page}页 +{page_added}条 → 累计{len(all_comments)}条{pct}")
 
         page += 1
@@ -892,10 +938,14 @@ def fetch_root_comments(session: requests.Session, aid: int,
 
     if page > MAX_PAGES:
         partial = True
+        save_checkpoint(checkpoint_file, {
+            'comments': all_comments, 'page': page, 'total_hint': total_count_hint
+        })
         cprint(Ansi.yellow,
-               f"  ⚠ 已达最大页数上限({MAX_PAGES})，评论可能未爬完；检查点已保留，重新运行可续爬")
+               f"  ⚠ 已达本地页数上限 MAX_PAGES={MAX_PAGES}，已保存检查点；"
+               f"若确认接口仍能继续翻页，请调大该常量后重跑")
 
-    return all_comments, total_count_hint, partial
+    return all_comments, total_count_hint, partial, truncated
 
 
 # ============================================================
@@ -1762,7 +1812,7 @@ def main():
         ckpt_reply = os.path.join(output_dir, f'checkpoint_{bvid}_replies_{sort_type}.json')
 
         cprint(Ansi.blue, "\n📥 阶段A：拉取一级评论...")
-        root_comments, total_count, root_partial = fetch_root_comments(
+        root_comments, total_count, root_partial, root_truncated = fetch_root_comments(
             session, aid, sort_type, nohot, ckpt_root)
         if root_partial:
             # 残缺数据不再当作完整结果输出，检查点保留以便续爬
@@ -1770,8 +1820,13 @@ def main():
                    f"  ❌ 一级评论未拉完（已 {len(root_comments)} 条），已保留检查点，未输出文件")
             cprint(Ansi.yellow,
                    "     网络失败：重跑同一视频/同一排序即可从断点继续；"
-                   "若提示已达 MAX_PAGES 上限，请先调大该常量")
+                   "若提示已达本地 MAX_PAGES 上限，请先调大该常量")
             sys.exit(1)
+        if root_truncated:
+            append_info_md_note(output_dir,
+                                f"⚠ 一级评论被接口翻页上限截断：该接口最多返回前 "
+                                f"{API_MAX_ROOT_COMMENTS} 条（offset ≤ {API_MAX_OFFSET}），"
+                                f"本次已获取 {len(root_comments)} 条，更早的一级评论无法获取。")
         if not root_comments:
             cprint(Ansi.red, "❌ 未获取到任何一级评论")
             sys.exit(1)
@@ -1832,7 +1887,7 @@ def main():
 
         ckpt_root = os.path.join(output_dir, f'checkpoint_{bvid}_rootonly_{sort_type}.json')
         cprint(Ansi.blue, "\n📥 拉取一级评论...")
-        root_comments, total_count, root_partial = fetch_root_comments(
+        root_comments, total_count, root_partial, root_truncated = fetch_root_comments(
             session, aid, sort_type, nohot, ckpt_root)
         if root_partial:
             # 残缺数据不再当作完整结果输出，检查点保留以便续爬
@@ -1840,8 +1895,13 @@ def main():
                    f"  ❌ 一级评论未拉完（已 {len(root_comments)} 条），已保留检查点，未输出文件")
             cprint(Ansi.yellow,
                    "     网络失败：重跑同一视频/同一排序即可从断点继续；"
-                   "若提示已达 MAX_PAGES 上限，请先调大该常量")
+                   "若提示已达本地 MAX_PAGES 上限，请先调大该常量")
             sys.exit(1)
+        if root_truncated:
+            append_info_md_note(output_dir,
+                                f"⚠ 一级评论被接口翻页上限截断：该接口最多返回前 "
+                                f"{API_MAX_ROOT_COMMENTS} 条（offset ≤ {API_MAX_OFFSET}），"
+                                f"本次已获取 {len(root_comments)} 条，更早的一级评论无法获取。")
         if not root_comments:
             cprint(Ansi.red, "❌ 未获取到任何一级评论")
             sys.exit(1)
