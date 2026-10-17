@@ -296,6 +296,17 @@ def request_wbi(session: requests.Session, url: str, params: dict,
                 time.sleep(wait)
                 continue
 
+            # ── HTTP 412 风控拦截 ──
+            if r.status_code == 412:
+                last_error = "HTTP 412 风控拦截"
+                wait = 10 * (attempt + 1) + random.uniform(0, 3)
+                if not silent:
+                    cprint(Ansi.yellow,
+                           f"  ⚠ HTTP 412 风控拦截，等待{wait:.1f}s ({attempt+1}/{retries})；"
+                           f"持续出现请更换网络或稍后重试")
+                time.sleep(wait)
+                continue
+
             # ── 非JSON检测 ──
             ct = r.headers.get('Content-Type', '')
             if 'application/json' not in ct:
@@ -794,7 +805,7 @@ def _extract_top_items(data: dict) -> list:
 
 def fetch_root_comments(session: requests.Session, aid: int,
                         sort_type: int, nohot: int,
-                        checkpoint_file: str) -> tuple[list, int]:
+                        checkpoint_file: str) -> tuple[list, int, bool]:
     """
     逐页拉取一级评论（支持断点续传与进度打印），并并入置顶评论。
     返回 (评论列表, 接口报告的一级评论计数, partial)；
