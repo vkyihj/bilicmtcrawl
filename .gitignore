@@ -1,0 +1,45 @@
+# ── Cookie 凭据（切勿提交）──
+bilicookie.txt
+bilicookie*.txt
+*.cookie
+.env
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+.venv/
+venv/
+env/
+ENV/
+
+# ── 测试 / 类型 / 静态检查缓存 ──
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ── 运行残留 ──
+*.log
+*.tmp
+checkpoint_*.json
+checkpoint_*.jsonl
+checkpoint_*.json.jsonl
+
+# ── 编辑器 / 系统 ──
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db

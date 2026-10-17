@@ -1,66 +1,14 @@
 #!/usr/bin/env python3
-"""
-╔══════════════════════════════════════════════════════════════╗
-║     B站视频评论爬取 · 交互式整合脚本 v3.3.10             ║
-║     （Bili Comment Crawler）                              ║
-║                                                            ║
-║  模式1 - 全量爬取（一级评论 + 所有楼中楼）                  ║
-║  模式2 - 仅爬取一级评论（不含楼中楼）                       ║
-║  模式3 - 指定楼层深度爬取（树形 or 时间顺序展示）           ║
-║                                                            ║
-║  支持：时间排序 / 热度排序 / 回复数排序                     ║
-║  特性：断点续传 · Wbi签名 · 反风控 · 回复树构建             ║
-║        Cookie自动读取bilicookie.txt · 输出按视频标题归档    ║
-╚══════════════════════════════════════════════════════════════╝
+"""B站视频评论爬取（交互式）。
 
-v3.3.10 变更记录：
-  - 修复：模式1 拉完一级评论后立即删除 root 检查点，致使 v3.3.7
-          声明的“检查点推迟到全流程成功后清理”实际失效——阶段B
-          中断或失败后重跑仍需重爬全部一级评论
-  - 现在的清理时机：仅在全流程结束后（阶段B 之后）清理
+模式1 全量爬取（一级评论 + 全部楼中楼）
+模式2 仅一级评论
+模式3 指定楼层深度爬取（树形或时间顺序展示）
 
-v3.3.9 变更记录：
-  - 修复（重要）：一级评论的置顶评论此前被完全漏抓
-      · 接口把置顶评论放在 data.top_replies / data.top(upper|admin)，
-        并不在 data.replies 中，且每页重复返回
-      · 现按 rpid 去重后并入一级评论；置顶楼层（模式1）的楼中楼也会被正常拉取
-      · 每条评论新增 is_top 字段（true=置顶），TXT 以 [置顶] 前缀标记
-      · JSON stats 与 TXT 头部新增「置顶评论」计数
-      · 楼中楼接口无置顶字段，模式3 不受影响
+支持时间/热度/回复数排序、断点续传、Wbi 签名、回复树构建；
+Cookie 自动读取 bilicookie.txt，输出按视频标题归档。
 
-v3.3.8 变更记录：
-  - 修复：模式3（及模式1失败重试）在爬取结束后的交互等待时间
-          被计入“总耗时”，显示值远大于真实爬取时间
-  - 改进：新增 timed_input() 统一包装输入，自动累计等待秒数
-  - 改进：总耗时 = 实际耗时 − 用户输入等待（只反映真实爬取时间）
-
-v3.3.7 变更记录：
-  - 修复：API 返回非零 code 时被误当正常响应（可能漏爬或崩溃），改为返回 None
-  - 修复：请求过于频繁(-509) 纳入自动重试
-  - 改进：用户去重改用 uid（为空回退 uname）
-  - 改进：输出文件名排序改用短标签（time / hot / reply）
-  - 改进：模式1 一级评论检查点推迟到全流程成功后清理
-  - 改进：模式3 的 replies_flat 不再携带 children 字段
-  - 清理：移除 fetch_all_replies 中的无效循环
-  - 文案/注释：投稿时间、一级评论计数、Cookie 引号说明、步骤编号统一
-
-v3.3.6 变更记录：
-  - 新增评论正文配图（content.pictures）：不再丢弃图片链接
-  - JSON 每条评论新增两个字段：
-      · pictures  —— 原始图片对象列表（img_src/img_width/img_height/img_size）
-      · pic_urls  —— 纯图片链接列表（协议相对地址 // 已补全为 https:）
-  - TXT 每条评论正文后追加图片链接（仅 URL），模式1/2/3 全部生效
-  - JSON stats 与 TXT 头部新增「含图评论数 / 图片总数」统计
-
-v3.3.5 变更记录：
-  - 新增自动读取 Cookie：运行前将 Cookie 粘贴到本目录 bilicookie.txt
-    （仅一行裸Cookie，无任何标识），脚本自动读取，无需每次手动输入
-  - bilicookie.txt 不存在或为空时，自动回退为原交互式粘贴输入
-  - 兼容处理：自动剥离文件内容中的 "Cookie:" 前缀、首尾引号与 BOM
-
-
-用法：python bilicmtcrawl.py
-      然后按终端提示依次选择/输入即可，无需修改任何代码
+用法：python bilicmtcrawl.py，按终端提示操作即可。
 """
 
 import requests
@@ -79,9 +27,7 @@ from collections import Counter
 # --- tqdm 可选依赖（未安装时自动降级为无进度条）---
 try:
     from tqdm import tqdm
-    HAS_TQDM = True
 except ImportError:
-    HAS_TQDM = False
     class _DummyTqdm:
         def __init__(self, iterable=None, **kwargs):
             self.iterable = iterable
@@ -105,15 +51,21 @@ except ImportError:
 # ============================================================
 
 class Ansi:
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    MAGENTA = '\033[95m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-    RESET = '\033[0m'
+    # 输出重定向到文件/管道、或设置 NO_COLOR / TERM=dumb 时关闭颜色，
+    # 避免把转义码写进 txt/json 日志
+    enabled = (sys.stdout.isatty()
+               and os.environ.get('NO_COLOR') is None
+               and os.environ.get('TERM') != 'dumb')
+
+    GREEN = '\033[92m' if enabled else ''
+    YELLOW = '\033[93m' if enabled else ''
+    RED = '\033[91m' if enabled else ''
+    BLUE = '\033[94m' if enabled else ''
+    CYAN = '\033[96m' if enabled else ''
+    MAGENTA = '\033[95m' if enabled else ''
+    BOLD = '\033[1m' if enabled else ''
+    DIM = '\033[2m' if enabled else ''
+    RESET = '\033[0m' if enabled else ''
 
     @staticmethod
     def green(s):   return f"{Ansi.GREEN}{s}{Ansi.RESET}"
@@ -137,7 +89,7 @@ def cprint(color_func, text):
     print(color_func(text))
 
 
-# --- 用户交互等待计时（v3.3.8）---
+# --- 用户交互等待计时 ---
 # 累计“等待用户输入”的秒数，用于从总耗时中扣除，使显示值只反映真实爬取时间。
 _USER_WAIT = {'total': 0.0}
 
@@ -219,7 +171,7 @@ def parse_cookie(cookie_str: str) -> dict:
 
 def load_cookie_from_file(filename: str = 'bilicookie.txt') -> str | None:
     """
-    从当前目录读取 Cookie 文件（v3.3.5 新增）。
+    从当前目录读取 Cookie 文件。
     文件仅包含一行裸 Cookie，无任何标识；自动兼容处理：
       - 以 UTF-8 读取（容忍 BOM）
       - 剥离可选的 "Cookie:" 前缀
@@ -467,7 +419,7 @@ def extract_pictures(item: dict) -> tuple:
 
 
 def parse_comment(r: dict, oid: int, is_top: bool = False) -> dict:
-    """API返回 → 统一评论格式（v3.3.6：配图；v3.3.9：标记置顶）"""
+    """API返回 → 统一评论格式（含配图与置顶标记）"""
     _pictures, _pic_urls = extract_pictures(r)
     return {
         'rpid': r.get('rpid', 0),
@@ -595,7 +547,7 @@ def extract_bvid(raw: str) -> str | None:
         bvid = 'BV' + bvid[2:]
         return bvid
 
-    if 'b23.tv' in raw:
+    if 'b23.tv' in raw.lower():
         resolved = _resolve_short_link(raw)
         if resolved:
             match = re.search(r'[Bb][Vv][a-zA-Z0-9]{10}', resolved)
@@ -651,7 +603,7 @@ def extract_root_rpid(raw: str) -> int | None:
 
 
 # ============================================================
-# 输出目录 & 视频信息保存（v3.3.4 新增）
+# 输出目录 & 视频信息保存
 # ============================================================
 
 def sanitize_dirname(title: str, max_len: int = 60) -> str:
@@ -664,10 +616,11 @@ def sanitize_dirname(title: str, max_len: int = 60) -> str:
     清洗后为空字符串时返回 ''（由调用方回退）。
     """
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', '_', title)
-    name = name.strip()
+    # 去掉结尾的点/空格（Windows 与部分同步盘不接受）
+    name = name.strip().rstrip('. ')
     if not name:
         return ''
-    return _truncate_grapheme(name, max_len)
+    return _truncate_grapheme(name, max_len).rstrip('. ')
 
 
 def ensure_output_dir(title: str, bvid: str) -> str:
@@ -768,11 +721,21 @@ def save_view_info_md(output_dir: str, view: dict, video_info: dict):
 
 def save_checkpoint(filepath: str, data: dict):
     """将进度数据写入检查点文件（JSON格式，UTF-8）。"""
+    # 临时文件 + 原子替换，避免写到一半被中断导致检查点损坏
+    tmp = filepath + '.tmp'
     try:
-        with open(filepath, 'w', encoding='utf-8') as f:
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, filepath)
     except Exception as e:
         cprint(Ansi.yellow, f"  ⚠ 检查点保存失败: {e}")
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 
 def load_checkpoint(filepath: str) -> dict | None:
@@ -788,12 +751,16 @@ def load_checkpoint(filepath: str) -> dict | None:
 
 
 def remove_checkpoint(filepath: str):
-    """删除检查点文件（任务成功后清理断点）。文件不存在时静默跳过。"""
-    if os.path.exists(filepath):
-        try:
-            os.remove(filepath)
-        except Exception:
-            pass
+    """
+    删除检查点文件（任务成功后清理断点）。文件不存在时静默跳过。
+    连带清理增量日志(.jsonl)与原子写残留(.tmp)。
+    """
+    for path in (filepath, filepath + '.jsonl', filepath + '.tmp'):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
 
 
 # ============================================================
@@ -802,7 +769,7 @@ def remove_checkpoint(filepath: str):
 
 def _extract_top_items(data: dict) -> list:
     """
-    从 /x/v2/reply 响应中提取置顶评论原始 item（v3.3.9 新增）。
+    从 /x/v2/reply 响应中提取置顶评论原始 item。
     置顶评论不包含在 data['replies'] 中，需单独并入；兼容两种形态：
       - data['top_replies']  : 列表（实测每页重复返回）
       - data['top']          : 字典 {admin: item|None, upper: item|None}
@@ -829,12 +796,15 @@ def fetch_root_comments(session: requests.Session, aid: int,
                         sort_type: int, nohot: int,
                         checkpoint_file: str) -> tuple[list, int]:
     """
-    逐页拉取一级评论（支持断点续传与进度打印），并并入置顶评论（v3.3.9）。
-    返回 (评论列表, 接口报告的一级评论计数)；计数为0表示接口未给出。
+    逐页拉取一级评论（支持断点续传与进度打印），并并入置顶评论。
+    返回 (评论列表, 接口报告的一级评论计数, partial)；
+    计数为0表示接口未给出；partial=True 表示因请求失败或页数上限中途停止，
+    数据不完整。
     """
     all_comments = []
     page = 1
     total_count_hint = 0
+    partial = False
 
     ckpt = load_checkpoint(checkpoint_file)
     if ckpt:
@@ -861,11 +831,11 @@ def fetch_root_comments(session: requests.Session, aid: int,
             save_checkpoint(checkpoint_file, {
                 'comments': all_comments, 'page': page, 'total_hint': total_count_hint
             })
-            return all_comments, total_count_hint
+            return all_comments, total_count_hint, True
 
         replies = data.get('data', {}).get('replies', []) or []
 
-        # ── v3.3.9：并入置顶评论 ──
+        # ── 并入置顶评论 ──
         # 置顶不在 replies 中，且每页都会重复返回，故按 rpid 去重后并入
         page_added = 0
         for it in _extract_top_items(data):
@@ -910,10 +880,11 @@ def fetch_root_comments(session: requests.Session, aid: int,
         time.sleep(random.uniform(MAIN_DELAY_MIN, MAIN_DELAY_MAX))
 
     if page > MAX_PAGES:
+        partial = True
         cprint(Ansi.yellow,
-               f"  ⚠ 已达最大页数上限({MAX_PAGES})，强制停止。若评论未爬完可重新运行从检查点继续")
+               f"  ⚠ 已达最大页数上限({MAX_PAGES})，评论可能未爬完；检查点已保留，重新运行可续爬")
 
-    return all_comments, total_count_hint
+    return all_comments, total_count_hint, partial
 
 
 # ============================================================
@@ -927,6 +898,7 @@ def fetch_replies_for_root(session: requests.Session, aid: int,
     返回 (replies, partial)，partial=True 表示因请求失败中途退出，数据不完整。
     """
     replies = []
+    seen = set()          # 按 rpid 去重
     page = 1
     partial = False
     while page <= MAX_SUB_PAGES:
@@ -942,11 +914,99 @@ def fetch_replies_for_root(session: requests.Session, aid: int,
         if not sub:
             break
         for r in sub:
+            # 翻页期间新回复插入会导致同一楼中楼跨页重复，按 rpid 去重
+            rpid = r.get('rpid')
+            if rpid in seen:
+                continue
+            seen.add(rpid)
             replies.append(parse_comment(r, aid))
         page += 1
         time.sleep(random.uniform(SUB_DELAY_MIN, SUB_DELAY_MAX))
 
+    if page > MAX_SUB_PAGES:
+        cprint(Ansi.yellow,
+               f"  ⚠ root={root_rpid} 楼中楼已达上限 {MAX_SUB_PAGES} 页/"
+               f"{MAX_SUB_PAGES * 20} 条，若实际更多则超出部分已被截断")
+
     return replies, partial
+
+
+def fetch_replies_with_retry(session: requests.Session, aid: int,
+                             root_rpid: int) -> list:
+    """拉取楼中楼；数据不完整时询问是否重试，返回最终结果。"""
+    replies, partial = fetch_replies_for_root(session, aid, root_rpid)
+    while partial:
+        cprint(Ansi.yellow,
+               f"\n  ⚠ root={root_rpid} 的楼中楼数据可能不完整（已获取 {len(replies)} 条）")
+        print(f"  {Ansi.dim('可能原因：网络波动或B站临时限流')}")
+        try:
+            retry = timed_input(f"  {Ansi.bold('是否重新爬取？[y/n]')}: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if retry != 'y':
+            break
+        print(f"  🔄 重试 root={root_rpid}...", end=' ')
+        replies, partial = fetch_replies_for_root(session, aid, root_rpid)
+        print(f"{len(replies)}条 {'⚠再次失败' if partial else '✅'}")
+    return replies
+
+
+def _fmt_eta(seconds: float) -> str:
+    """秒数 → 紧凑 ETA 文本：45s / 3m20s / 1h05m"""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
+def _reply_journal_path(checkpoint_file: str) -> str:
+    """楼中楼增量检查点（JSONL）路径"""
+    return checkpoint_file + '.jsonl'
+
+
+def _append_reply_journal(checkpoint_file: str, root_rpid: int, replies: list):
+    """
+    追加写入一个楼层的楼中楼结果。
+    逐楼层 append 的成本是 O(1)，替代原先每 5 项把全部楼中楼重写一遍的 O(n²) 写法。
+    单行写入被中断最多损坏最后一行，读取时跳过。
+    """
+    try:
+        with open(_reply_journal_path(checkpoint_file), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'rpid': root_rpid, 'replies': replies},
+                               ensure_ascii=False) + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        cprint(Ansi.yellow, f"  ⚠ 楼中楼检查点追加失败: {e}")
+
+
+def _load_reply_journal(checkpoint_file: str) -> tuple[set, list]:
+    """读取楼中楼增量检查点，返回 (已完成 root_rpid 集合, 楼中楼列表)"""
+    done, replies = set(), []
+    path = _reply_journal_path(checkpoint_file)
+    if not os.path.exists(path):
+        return done, replies
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue          # 跳过被中断写坏的最后一行
+                rp = rec.get('rpid')
+                if rp is None:
+                    continue
+                done.add(rp)
+                replies.extend(rec.get('replies') or [])
+    except Exception as e:
+        cprint(Ansi.yellow, f"  ⚠ 楼中楼检查点读取失败: {e}")
+    return done, replies
 
 
 def fetch_all_replies(session: requests.Session, aid: int,
@@ -960,17 +1020,20 @@ def fetch_all_replies(session: requests.Session, aid: int,
 
     already_checked_rpids = set()
 
+    # 优先读 JSONL 增量检查点，同时兼容旧版整文件 JSON 检查点
+    done_rpids, saved = _load_reply_journal(checkpoint_file)
     ckpt = load_checkpoint(checkpoint_file)
-    done_rpids = set()
     if ckpt:
-        done_rpids = set(ckpt.get('done_rpids', []))
-        saved = ckpt.get('replies', [])
+        done_rpids |= set(ckpt.get('done_rpids', []))
+        saved = list(ckpt.get('replies', [])) + saved
+    if done_rpids or saved:
         existing = {c['rpid'] for c in all_data}
         for sr in saved:
-            if sr['rpid'] not in existing:
-                all_data.append(sr)
-                existing.add(sr['rpid'])
-                already_checked_rpids.add(sr['root'])
+            if sr.get('rpid') in existing:
+                continue
+            all_data.append(sr)
+            existing.add(sr['rpid'])
+            already_checked_rpids.add(sr['root'])
         cprint(Ansi.cyan, f"  📂 楼中楼阶段恢复：已完成 {len(done_rpids)} 条一级评论")
 
     candidates = []
@@ -987,8 +1050,13 @@ def fetch_all_replies(session: requests.Session, aid: int,
 
     failed_rpids = []
 
-    pbar = tqdm(enumerate(candidates), total=total, desc='  🧵 楼中楼', unit='条',
-                bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+    # ETA 移到行首：tqdm 会按终端宽度(ncols)从行尾截断整行，
+    # 原先 elapsed/remaining 字段位于行尾，终端宽度 <45 列时预计时间被整段裁掉；
+    # 同时改为自算 ETA，避免首个楼层处理期间 tqdm rate=0 只显示 "?"。
+    t_start = time.time()
+    pbar = tqdm(enumerate(candidates), total=total, unit='条',
+                desc=f'🧵 楼中楼 0/{total} 剩计算中',
+                bar_format='{desc}|{bar}|')
 
     for idx, comment in pbar:
         rpid = comment['rpid']
@@ -1005,16 +1073,16 @@ def fetch_all_replies(session: requests.Session, aid: int,
         done_rpids.add(rpid)
         already_checked_rpids.add(rpid)
 
-        desc = uname[:8]
-        if sub_partial:
-            desc += ' ⚠'
-        pbar.set_postfix({'当前': desc, '+': len(sub_replies)})
+        # 当前用户/条数并入 desc 且置于行尾：窄终端裁剪时先切它，ETA 不受影响
+        desc = uname[:8] + ('⚠' if sub_partial else '')
+        done = idx + 1
+        elapsed_s = time.time() - t_start
+        eta_txt = _fmt_eta(elapsed_s / done * (total - done)) if done else '计算中'
+        pbar.set_description(
+            f'🧵 楼中楼 {done}/{total} 剩{eta_txt} {desc}+{len(sub_replies)}')
 
-        if (idx + 1) % 5 == 0:
-            save_checkpoint(checkpoint_file, {
-                'done_rpids': list(done_rpids),
-                'replies': [c for c in all_data if c['root'] != 0],
-            })
+        # 逐楼层追加写入（O(1)），替代原先每 5 项全量重写（O(n²) I/O）
+        _append_reply_journal(checkpoint_file, rpid, sub_replies)
 
     pbar.close()
     return all_data, failed_rpids
@@ -1187,6 +1255,11 @@ def get_root_comment_info(session: requests.Session, aid: int,
 # 输出
 # ============================================================
 
+def _now_ts_tag() -> str:
+    """文件名用时间戳（毫秒精度）：避免同秒内多次输出互相覆盖"""
+    return datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+
+
 def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
                        sort_label: str, output_dir: str, sort_tag: str = 'time'):
     """
@@ -1201,7 +1274,7 @@ def output_mode1_mode2(all_comments: list, video_info: dict, bvid: str,
     uc = Counter((c['uid'] or c['uname']) for c in all_comments)
 
     tag = sort_tag or 'time'
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    ts = _now_ts_tag()
     json_path = os.path.join(output_dir, f'comments_{bvid}_{tag}_{ts}.json')
     txt_path = os.path.join(output_dir, f'comments_{bvid}_{tag}_{ts}.txt')
 
@@ -1274,7 +1347,7 @@ def output_mode3(root_comment: dict, replies: list, tree_root: dict,
     pic_comments = sum(1 for c in all_nodes if c.get('pic_urls'))
     pic_total = sum(len(c.get('pic_urls', [])) for c in all_nodes)
 
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    ts = _now_ts_tag()
     json_path = os.path.join(output_dir, f'replies_{bvid}_root{root_rpid}_{tag}_{ts}.json')
     txt_path = os.path.join(output_dir, f'replies_{bvid}_root{root_rpid}_{tag}_{ts}.txt')
 
@@ -1319,7 +1392,7 @@ def print_banner():
     banner = """
 ╔══════════════════════════════════════════════════╗
 ║     🎯  评论爬取                                ║
-║     B站视频评论爬虫 · 交互式脚本 v3.3.10       ║
+║     B站视频评论爬虫 · 交互式脚本               ║
 ║                                                  ║
 ║  模式1 · 全量爬取（一级评论 + 全部楼中楼）      ║
 ║  模式2 · 仅一级评论                             ║
@@ -1369,7 +1442,7 @@ def select_mode() -> int:
 def input_cookie_interactive() -> str:
     """
     获取 Cookie：
-      1. 优先自动读取当前目录 bilicookie.txt（仅一行裸Cookie，无标识，v3.3.5）
+      1. 优先自动读取当前目录 bilicookie.txt（仅一行裸Cookie，无标识）
       2. 文件不存在/为空时，回退为交互式粘贴输入（支持多行，空行结束）
     返回 Cookie 字符串。
     """
@@ -1660,7 +1733,7 @@ def main():
     print(f"  🆔 AID: {aid}")
     video_info = {'aid': aid, 'bvid': bvid, 'title': title}
 
-    # ── v3.3.4：创建按视频标题命名的输出文件夹，并保存完整view信息 ──
+    # ── 创建按视频标题命名的输出文件夹，并保存完整view信息 ──
     output_dir = ensure_output_dir(title, bvid)
     save_view_info_md(output_dir, view, video_info)
     cprint(Ansi.cyan, f"  📁 保存目录: {output_dir}")
@@ -1678,7 +1751,16 @@ def main():
         ckpt_reply = os.path.join(output_dir, f'checkpoint_{bvid}_replies_{sort_type}.json')
 
         cprint(Ansi.blue, "\n📥 阶段A：拉取一级评论...")
-        root_comments, total_count = fetch_root_comments(session, aid, sort_type, nohot, ckpt_root)
+        root_comments, total_count, root_partial = fetch_root_comments(
+            session, aid, sort_type, nohot, ckpt_root)
+        if root_partial:
+            # 残缺数据不再当作完整结果输出，检查点保留以便续爬
+            cprint(Ansi.red,
+                   f"  ❌ 一级评论未拉完（已 {len(root_comments)} 条），已保留检查点，未输出文件")
+            cprint(Ansi.yellow,
+                   "     网络失败：重跑同一视频/同一排序即可从断点继续；"
+                   "若提示已达 MAX_PAGES 上限，请先调大该常量")
+            sys.exit(1)
         if not root_comments:
             cprint(Ansi.red, "❌ 未获取到任何一级评论")
             sys.exit(1)
@@ -1686,15 +1768,13 @@ def main():
             cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条（接口报告约 {total_count} 条）")
         else:
             cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条")
-        # v3.3.10：此处不再清理 root 检查点。原在此提前删除，使 v3.3.7
-        # 声明的“推迟到全流程成功后清理”实际失效——阶段B 中断后重跑
-        # 仍需重爬全部一级评论。现统一由阶段B 结束后那一处负责清理。
+        # root 检查点在阶段B 结束后统一清理
 
         has_replies = any(c['rcount'] > 0 for c in root_comments)
         if has_replies:
             cprint(Ansi.blue, "\n📥 阶段B：拉取楼中楼...")
             all_comments, failed_rpids = fetch_all_replies(session, aid, root_comments, ckpt_reply)
-            remove_checkpoint(ckpt_reply)
+            # 检查点在输出成功后清理，避免重试/写文件被中断时丢失楼中楼成果
 
             # ── 处理拉取失败的楼层 ──
             while failed_rpids:
@@ -1729,8 +1809,9 @@ def main():
             cprint(Ansi.dim, "\nℹ️  所有一级评论均无楼中楼")
             all_comments = list(root_comments)
 
-        remove_checkpoint(ckpt_root)
         output_mode1_mode2(all_comments, video_info, bvid, sort_label, output_dir, sort_tag)
+        remove_checkpoint(ckpt_reply)
+        remove_checkpoint(ckpt_root)
 
     elif mode == 2:
         # ═══ 模式2：仅一级评论 ═══
@@ -1740,16 +1821,25 @@ def main():
 
         ckpt_root = os.path.join(output_dir, f'checkpoint_{bvid}_rootonly_{sort_type}.json')
         cprint(Ansi.blue, "\n📥 拉取一级评论...")
-        root_comments, total_count = fetch_root_comments(session, aid, sort_type, nohot, ckpt_root)
+        root_comments, total_count, root_partial = fetch_root_comments(
+            session, aid, sort_type, nohot, ckpt_root)
+        if root_partial:
+            # 残缺数据不再当作完整结果输出，检查点保留以便续爬
+            cprint(Ansi.red,
+                   f"  ❌ 一级评论未拉完（已 {len(root_comments)} 条），已保留检查点，未输出文件")
+            cprint(Ansi.yellow,
+                   "     网络失败：重跑同一视频/同一排序即可从断点继续；"
+                   "若提示已达 MAX_PAGES 上限，请先调大该常量")
+            sys.exit(1)
         if not root_comments:
             cprint(Ansi.red, "❌ 未获取到任何一级评论")
             sys.exit(1)
-        remove_checkpoint(ckpt_root)
         if total_count > 0:
             cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条（接口报告约 {total_count} 条）")
         else:
             cprint(Ansi.green, f"✅ 一级评论: {len(root_comments)} 条")
         output_mode1_mode2(root_comments, video_info, bvid, sort_label, output_dir, sort_tag)
+        remove_checkpoint(ckpt_root)
 
     elif mode == 3:
         # ═══ 模式3：指定楼层 ═══
@@ -1761,26 +1851,7 @@ def main():
         root_comment = get_root_comment_info(session, aid, root_rpid)
 
         cprint(Ansi.blue, "\n📥 拉取楼中楼...")
-        replies, partial = fetch_replies_for_root(session, aid, root_rpid)
-
-        # ── 处理拉取失败 ──
-        while partial:
-            cprint(Ansi.yellow,
-                   f"\n  ⚠ root={root_rpid} 的楼中楼数据可能不完整（已获取 {len(replies)} 条）")
-            print(f"  {Ansi.dim('可能原因：网络波动或B站临时限流')}")
-            try:
-                retry = timed_input(f"  {Ansi.bold('是否重新爬取？[y/n]')}: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-            if retry != 'y':
-                break
-            print(f"  🔄 重试 root={root_rpid}...", end=' ')
-            replies, partial = fetch_replies_for_root(session, aid, root_rpid)
-            if partial:
-                print(f"{len(replies)}条 ⚠再次失败")
-            else:
-                print(f"{len(replies)}条 ✅")
+        replies = fetch_replies_with_retry(session, aid, root_rpid)
 
         cprint(Ansi.green, f"✅ 楼中楼: {len(replies)} 条")
 
@@ -1800,26 +1871,7 @@ def main():
                 if show_summary_and_confirm(3, bvid, root_rpid=new_rpid,
                                             display_mode=new_display):
                     rc = get_root_comment_info(session, aid, new_rpid)
-                    rp, rp_partial = fetch_replies_for_root(session, aid, new_rpid)
-
-                    # ── 处理拉取失败 ──
-                    while rp_partial:
-                        cprint(Ansi.yellow,
-                               f"\n  ⚠ root={new_rpid} 的楼中楼数据可能不完整（已获取 {len(rp)} 条）")
-                        print(f"  {Ansi.dim('可能原因：网络波动或B站临时限流')}")
-                        try:
-                            retry2 = timed_input(f"  {Ansi.bold('是否重新爬取？[y/n]')}: ").strip().lower()
-                        except (EOFError, KeyboardInterrupt):
-                            print()
-                            break
-                        if retry2 != 'y':
-                            break
-                        print(f"  🔄 重试 root={new_rpid}...", end=' ')
-                        rp, rp_partial = fetch_replies_for_root(session, aid, new_rpid)
-                        if rp_partial:
-                            print(f"{len(rp)}条 ⚠再次失败")
-                        else:
-                            print(f"{len(rp)}条 ✅")
+                    rp = fetch_replies_with_retry(session, aid, new_rpid)
 
                     tr = build_reply_tree(rc, rp)
                     output_mode3(rc, rp, tr, video_info, bvid, new_rpid, new_display, output_dir)
