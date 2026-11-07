@@ -543,7 +543,8 @@ def _truncate_grapheme(text: str, max_len: int) -> str:
         nxt = ord(chars[cut])
         prev = ord(chars[cut - 1])
         if (_is_combining_mark(nxt) or _is_variation_selector(nxt)
-                or _is_emoji_modifier(nxt)):
+                or _is_emoji_modifier(nxt)
+                or nxt in (0x200C, 0x200D)):
             cut -= 1
             continue
         if prev in (0x200C, 0x200D):

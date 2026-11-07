@@ -1,57 +1,35 @@
-# ── Cookie 凭据（切勿提交）──
-bilicookie.txt
+# ── 凭据（切勿提交）──
 bilicookie*.txt
-*.cookie
-.env
 
 # ── Python ──
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-build/
-dist/
-*.egg-info/
-.eggs/
-pip-wheel-metadata/
 .venv/
 venv/
-env/
-ENV/
-
-# ── 测试 / 类型 / 静态检查缓存 ──
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
 
 # ── 运行残留 ──
 *.log
 *.tmp
 checkpoint_*.json
 checkpoint_*.jsonl
-checkpoint_*.json.jsonl
 
-# ── 爬取输出（本地数据，勿提交）──
+# ── 爬取输出（本地数据）──
 out/
-# 旧版本遗留在仓库根的爬取产物（现统一写入 out/）
 /comments_*.json
 /comments_*.txt
 /replies_*.json
 /replies_*.txt
 /信息.md
 
-# ── 本地临时文件 ──
+# ── 本机测试（不随仓库分发）──
+/tests/
+
+# ── 临时文件 ──
 /tmp/
 
 # ── 编辑器 / 系统 ──
 .idea/
 .vscode/
 *.swp
-*~
 .DS_Store
 Thumbs.db
