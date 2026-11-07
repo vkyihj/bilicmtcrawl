@@ -41,6 +41,17 @@ BILI_OUT=./data python bilicmtcrawl.py            # 或用环境变量
 python bilicmtcrawl.py --help                     # 查看参数说明
 ```
 
+## 测试
+
+离线单元测试（stdlib `unittest`，无新增依赖；不联网、不读 `bilicookie.txt`、不写入 `out/`）：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+覆盖输出根目录解析、目录名清洗与创建、Wbi 签名、评论字段解析、回复树与文本渲染、
+检查点与增量日志、信息.md、模式 1/2 落盘、Cookie 文件读取等。
+
 ## 爬取模式
 
 ### 模式 1：全量爬取

@@ -1,5 +1,13 @@
 # 变更记录
 
+v3.3.18 变更记录：
+  - 测试：tests/ 随仓库发布，用例扩展至 52 条
+      · 新增 Wbi 签名、parse_comment、回复树、文本渲染、增量检查点、
+        信息.md、模式 1/2 落盘、Cookie 文件、短链分支（mock 网络）等用例
+      · 仍全程离线，不读 bilicookie.txt，不写入 out/
+  - 维护：.gitignore 移除 /tests/ 忽略项
+  - 文档：README 增加「测试」小节
+
 v3.3.17 变更记录：
   - 修复：_truncate_grapheme 截断 ZWJ 组合 emoji 时可能切进字素簇内部
       · 循环增加「下一个字符为 ZWJ/ZWNJ」判断，沿序列回退到边界
