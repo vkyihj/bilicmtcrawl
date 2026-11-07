@@ -36,6 +36,18 @@ checkpoint_*.json
 checkpoint_*.jsonl
 checkpoint_*.json.jsonl
 
+# ── 爬取输出（本地数据，勿提交）──
+out/
+# 旧版本遗留在仓库根的爬取产物（现统一写入 out/）
+/comments_*.json
+/comments_*.txt
+/replies_*.json
+/replies_*.txt
+/信息.md
+
+# ── 本地临时文件 ──
+/tmp/
+
 # ── 编辑器 / 系统 ──
 .idea/
 .vscode/

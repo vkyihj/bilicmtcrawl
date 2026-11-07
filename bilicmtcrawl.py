@@ -8,9 +8,11 @@
 支持时间/热度/回复数排序、断点续传、Wbi 签名、回复树构建；
 Cookie 自动读取 bilicookie.txt，输出按视频标题归档。
 
-用法：python bilicmtcrawl.py，按终端提示操作即可。
+用法：python bilicmtcrawl.py，按终端提示操作即可；
+      python bilicmtcrawl.py --out DIR 可指定输出根目录（等价环境变量 BILI_OUT）。
 """
 
+import argparse
 import requests
 import time
 import json
@@ -158,6 +160,14 @@ DISPLAY_OPTIONS = {
     '1': {'label': '🌲 树形结构（按回复关系层级展示，最直观）', 'mode': 'tree'},
     '2': {'label': '🕐 时间顺序（扁平列表，按发布时间排列）',  'mode': 'flat'},
 }
+
+# 输出根目录：脚本所在目录下的 out/，爬取结果按视频标题归档其中
+OUT_DIR_NAME = 'out'
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_OUT_DIR = os.path.join(SCRIPT_DIR, OUT_DIR_NAME)
+
+# 运行时确定的输出根目录（main 按 --out > BILI_OUT > 默认 解析后覆盖）
+OUT_ROOT = DEFAULT_OUT_DIR
 
 # ============================================================
 # 工具函数
@@ -668,14 +678,15 @@ def sanitize_dirname(title: str, max_len: int = 60) -> str:
 
 def ensure_output_dir(title: str, bvid: str) -> str:
     """
-    在当前目录下创建并返回按视频标题命名的输出文件夹（绝对路径）。
+    在输出根目录（默认脚本所在目录的 out/，可由 --out / BILI_OUT 覆盖）下，
+    创建并返回按视频标题命名的输出文件夹（绝对路径）。
     标题为空或清洗后为空时，回退为「BV号_视频」。
     文件夹已存在时直接复用（不删除旧文件，新文件追加其中）。
     """
     dirname = sanitize_dirname(title)
     if not dirname:
         dirname = f'{bvid}_视频'
-    output_dir = os.path.join(os.getcwd(), dirname)
+    output_dir = os.path.join(OUT_ROOT, dirname)
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
 
@@ -1745,11 +1756,61 @@ def show_summary_and_confirm(mode: int, bvid: str, **kwargs) -> bool:
 
 
 # ============================================================
+# 命令行参数 & 输出根目录
+# ============================================================
+
+def resolve_out_root(cli_value: str | None = None) -> str:
+    """
+    解析输出根目录，优先级：--out > 环境变量 BILI_OUT > 脚本所在目录/out。
+    相对路径按当前工作目录解析；支持 ~ 与 $VAR 展开；
+    空值（含仅空白）视为未提供，跳过并提示。只返回绝对路径，不创建目录。
+    """
+    for raw, source in ((cli_value, '--out'), (os.environ.get('BILI_OUT'), 'BILI_OUT')):
+        if raw is None:
+            continue
+        value = raw.strip()
+        if not value:
+            cprint(Ansi.yellow, f"  ⚠ {source} 为空，已忽略")
+            continue
+        return os.path.abspath(os.path.expanduser(os.path.expandvars(value)))
+    return DEFAULT_OUT_DIR
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    """解析命令行参数；不传任何参数时保持原有的纯交互流程。"""
+    parser = argparse.ArgumentParser(
+        prog='bilicmtcrawl.py',
+        description='B站视频评论爬取（交互式）；可用 --out 或 BILI_OUT 指定输出根目录。',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            '输出根目录优先级：--out > 环境变量 BILI_OUT > 脚本所在目录/out\n'
+            '相对路径按当前工作目录解析。\n'
+            '\n'
+            '示例：\n'
+            '  python bilicmtcrawl.py\n'
+            '  python bilicmtcrawl.py --out /sdcard/bili_data\n'
+            '  BILI_OUT=./data python bilicmtcrawl.py\n'
+        ),
+    )
+    parser.add_argument('-o', '--out', metavar='DIR', default=None,
+                        help='输出根目录（默认：脚本所在目录/out）')
+    return parser.parse_args(argv)
+
+
+# ============================================================
 # 主流程
 # ============================================================
 
 def main():
+    global OUT_ROOT
+
+    # 先解析参数：--help / --out 在进入交互前生效
+    args = parse_args()
+    OUT_ROOT = resolve_out_root(args.out)
+
     print_banner()
+    if OUT_ROOT != DEFAULT_OUT_DIR:
+        cprint(Ansi.cyan, f"  📁 输出根目录: {OUT_ROOT}")
 
     mode = select_mode()
 
@@ -1812,7 +1873,11 @@ def main():
     video_info = {'aid': aid, 'bvid': bvid, 'title': title}
 
     # ── 创建按视频标题命名的输出文件夹，并保存完整view信息 ──
-    output_dir = ensure_output_dir(title, bvid)
+    try:
+        output_dir = ensure_output_dir(title, bvid)
+    except OSError as e:
+        cprint(Ansi.red, f"❌ 无法创建输出目录（{OUT_ROOT}）: {e}")
+        sys.exit(1)
     save_view_info_md(output_dir, view, video_info)
     cprint(Ansi.cyan, f"  📁 保存目录: {output_dir}")
 

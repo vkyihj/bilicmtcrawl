@@ -14,7 +14,7 @@
 - 支持纯 BV 号、完整链接、b23.tv 短链接（自动解析）输入
 - 模式 3 支持直接粘贴评论区评论链接，自动识别 BV 号与楼主 id（root_rpid）
 - **保留评论正文配图**：JSON 输出 `pictures` / `pic_urls`，TXT 正文后追加图片链接，并统计含图评论数与图片总数
-- 输出按视频标题自动归档到独立文件夹；view 接口完整信息存为 `信息.md`
+- 输出按视频标题自动归档到 `out/<视频标题>/`；输出根目录可用 `--out DIR` / 环境变量 `BILI_OUT` 改；view 接口完整信息存为 `信息.md`
 - **自动读取本目录 `bilicookie.txt`（单行裸 Cookie），免手动输入；文件缺失时回退手动粘贴**
 - **总耗时只统计真实爬取/处理时间**，等待你输入的秒数自动扣除
 - 每次输出 JSON + TXT；三种速度预设；Cookie 自动检测；可选 tqdm 进度条
@@ -31,7 +31,15 @@
 python bilicmtcrawl.py
 ```
 
-按提示依次：选择模式 → 输入 Cookie（或已配置 bilicookie.txt 则自动读取）→ 输入 BVID → 选择排序 → 选择速度 → 确认摘要 → 等待完成。结果保存在脚本同目录下、按视频标题命名的文件夹中。
+按提示依次：选择模式 → 输入 Cookie（或已配置 bilicookie.txt 则自动读取）→ 输入 BVID → 选择排序 → 选择速度 → 确认摘要 → 等待完成。结果保存在脚本同目录的 `out/` 下、按视频标题命名的文件夹中。
+
+输出根目录可配置，优先级 `--out` > 环境变量 `BILI_OUT` > 脚本所在目录的 `out/`（相对路径按当前工作目录解析）：
+
+```bash
+python bilicmtcrawl.py --out /sdcard/bili_data    # 指定任意目录
+BILI_OUT=./data python bilicmtcrawl.py            # 或用环境变量
+python bilicmtcrawl.py --help                     # 查看参数说明
+```
 
 ## 爬取模式
 
@@ -78,10 +86,10 @@ python bilicmtcrawl.py
 
 ## 输出
 
-输出目录自动创建（非法字符替换为 `_`，标题最长 60 字符，为空回退 `BV号_视频`）：
+输出目录自动创建（位于脚本所在目录的 `out/` 下；非法字符替换为 `_`，标题最长 60 字符，为空回退 `BV号_视频`）：
 
 ```
-./<视频标题>/
+./out/<视频标题>/
 ├── 信息.md                                        # view 完整信息（概览表格 + 完整原始JSON）
 ├── comments_{BVID}_{time|hot|reply}_{时间戳}.json / .txt  # 模式 1/2（排序短标签）
 ├── replies_{BVID}_root{rpid}_{tree|flat}_{时间戳}.json / .txt  # 模式 3
@@ -94,6 +102,7 @@ python bilicmtcrawl.py
 - 评论正文配图：JSON 保留完整图片对象，TXT 在正文后追加 `🖼 图片链接`（仅 URL）
 - 置顶评论：JSON 中 `is_top` 为 `true`；TXT 行首以 `[置顶][一级]` 标记；TXT 头部与终端汇总均含置顶条数
 - 模式 3 的 JSON 中，`replies_flat` 为扁平列表（不含 `children` 字段），`reply_tree` 为树结构
+- 输出根目录：`--out DIR` > `BILI_OUT` > 脚本所在目录/out；相对路径按当前工作目录解析，空值自动忽略；`out/` 与根目录历史产物已加入 `.gitignore`
 
 JSON 结构（模式 1/2）：
 
@@ -195,7 +204,7 @@ JSON 结构（模式 1/2）：
   一级评论: 4940 条
 
 爬取完成！总评论: 8542 一级: 4940 楼中楼: 3602 用户: 2310人 置顶: 1
-  📁 保存目录: ./<视频标题>/
+  📁 保存目录: /path/to/bilicmtcrawl/out/<视频标题>/
   总耗时: 856秒 (14.3分钟)
 ```
 
@@ -214,7 +223,8 @@ JSON 结构（模式 1/2）：
 | 评论配图 | 取自 `content.pictures`，保留原始对象；`//` 相对地址补全为 `https:` |
 | Wbi 密钥 | 缓存于 session，签名错误（-412）时自动刷新 |
 | 计时 | `总耗时 = 实际耗时 − 用户输入等待`（`timed_input` 累计） |
-| 输出目录 | 按视频标题自动命名，view 完整信息存为 `信息.md` |
+| 输出目录 | 脚本所在目录的 `out/` 下按视频标题自动命名，view 完整信息存为 `信息.md` |
+| 输出根目录 | `--out DIR` > `BILI_OUT` > 脚本目录/out（相对路径按 cwd 解析） |
 
 
 请合理使用本脚本，尊重 B 站用户内容及平台规则，设置合理的爬取间隔，避免对服务器造成不必要的压力。
